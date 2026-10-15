@@ -28,9 +28,9 @@ We're building something new: a Nextcloud sync client that fights back against r
 | Milestone | Status |
 |-----------|--------|
 | Core Kill Switch engine | ✅ Complete |
-| Threat detectors (4 types) | ✅ Complete |
+| Threat detectors (5 types) | ✅ Complete |
 | Desktop UI (Settings + Alerts) | ✅ Complete |
-| Test suite (118 tests) | ✅ Complete |
+| Test suite (192 tests, incl. end-to-end attack scenarios) | ✅ Complete |
 | Windows build pipeline | ✅ Complete |
 | Linux build pipeline | ✅ Complete |
 | Android client | ⏳ Planned |
@@ -103,11 +103,33 @@ When suspicious activity is detected (mass deletions, file encryption patterns, 
 
 | Feature | Description |
 |---------|-------------|
-| **Mass Delete Detection** | Triggers when too many files are deleted in a short time window |
-| **Entropy Analysis** | Detects encrypted/ransomware files by analyzing file entropy patterns |
-| **Pattern Detection** | Recognizes 80+ known ransomware file extensions (.locked, .encrypted, .cry, etc.) |
-| **Canary Files** | Monitors honeypot files - if they're touched, something's wrong |
-| **Automatic Backup** | Creates safety snapshots before suspicious operations |
+| **Pattern Detection** | 90+ known ransomware extensions, double extensions (`report.pdf.locked`), the random per-victim extensions of modern RaaS families (LockBit 3/4, BlackCat, Qilin, RansomHub: `invoice.pdf.HLJkNskOq`), and ransom notes |
+| **Format Signature Check** | A `.jpg`, `.pdf`, `.docx`, `.zip`, `.mp4`... that no longer starts with its own signature, or whose structural tail (ZIP directory, PDF `%%EOF`, PNG `IEND`) is gone, has been encrypted in place |
+| **Entropy Analysis** | Text-like files that became random, and bursts of random-looking files of unknown type |
+| **Mass Delete Detection** | Too many deletions in a short time window |
+| **Canary Files** | Honeypot files that must never change: any modification, rename or deletion trips the switch |
+| **Sync Pause** | All sync folders are paused and an alert is raised; the pause survives a client restart until you reset it |
+| **Backup Action** | Copies the files named by the triggering threat (useful for deletions coming from the server; local files that were already encrypted are recovered from the server's versions) |
+
+### What a simulated attack looks like
+
+Measured by `test/testkillswitchscenarios.cpp` with the five detectors and default settings ("files lost" = files handed to the sync before the switch tripped; the server copy of those files is still protected by Nextcloud's versioning):
+
+| Attack (as real families do it) | Result |
+|---|---|
+| Rename with random extension (`.HLJkNskOq`) | Paused after 2 files (immediately if the original is deleted in the same run) |
+| In-place full encryption, same names | Paused on the 1st file |
+| In-place header-only (first 4 KB, LockBit 2/3 style) | Paused on the 1st file |
+| Alternating 1 MB chunks, first chunk hit (Play style) | Paused on the 1st file |
+| Tail-only encryption, header intact | Paused after 2 files |
+| Delete + recreate as `.locked` | Paused on the 1st file |
+| Ransom note dropped | Paused immediately |
+| Canary file touched | Paused immediately |
+| Mass deletion | Paused at the 10th file (default threshold) |
+
+Benign workloads in the same suite (25 new photos, creating archives, editing text, saving a KeePass database, deleting a few files, legitimate renames, Nextcloud conflict copies, a new `README.txt`) never trip the switch.
+
+**Known gaps:** chunked encryption that spares both the header and the structural tail of a file (e.g. only the middle megabyte), and tail-only damage on formats without a trailer (`.jpg`, `.mp4`), are not detected per file yet. Chunk-level sampling is the next step.
 
 ### Threat Dashboard
 
@@ -148,13 +170,7 @@ cd nextcloud-sentinel
 
 #### Linux (Docker)
 
-```bash
-git clone https://github.com/jlacerte/nextcloud-sentinel.git
-cd nextcloud-sentinel
-
-# Build using Docker
-./build-wsl.sh --docker
-```
+The Linux CI builds inside the upstream `continuous-integration-client-qt6` container; see `.github/workflows/linux-sentinel-ci.yml` for the exact CMake invocation (Qt 6.8, ECM, KF6).
 
 #### Full Build Instructions
 
@@ -191,30 +207,54 @@ src/libsync/killswitch/
 ├── threatdetector.h         # Detector interface
 ├── threatlogger.cpp         # Threat history
 ├── detectors/
-│   ├── massdeletedetector   # Volume-based detection
-│   ├── entropydetector      # Entropy analysis
-│   ├── patterndetector      # Extension matching
-│   └── canarydetector       # Honeypot monitoring
+│   ├── patterndetector          # Extensions, random suffixes, ransom notes
+│   ├── canarydetector           # Honeypot monitoring
+│   ├── massdeletedetector       # Volume-based detection
+│   ├── formatsignaturedetector  # Magic bytes + structural tail checks
+│   └── entropydetector          # Entropy analysis
 └── actions/
-    ├── syncaction           # Pause/resume sync
-    └── backupaction         # Safety snapshots
+    ├── syncaction               # Action interface
+    └── backupaction             # Copies of the threatened files
+
+src/gui/killswitch/
+├── sentinelcontroller       # Pauses/resumes folders, raises the alert, persists the trigger
+├── killswitchsettings       # Settings page (presets, thresholds, canaries)
+├── killswitchalertdialog    # Alert shown when the switch trips
+└── killswitchdashboard      # Statistics
 ```
+
+One `KillSwitchManager` per process: every sync folder feeds the same event stream, so an attack spread over several folders is still seen as one.
 
 ---
 
 ## Testing
 
 ```bash
-# Run Kill Switch tests
-cd build && ctest -R KillSwitch --output-on-failure
+# Run all Kill Switch tests (unit, format signatures, end-to-end scenarios)
+cd build && ctest -R "KillSwitch|FormatSignature" --output-on-failure
 ```
 
-**Test coverage:** 118 tests covering:
-- False positive scenarios (README.txt, password databases, small deletion bursts)
-- Edge cases (empty files, long paths, unicode, renames)
-- Thread safety
-- Cache and timing
-- Real encrypted sample files (`test/data/encrypted/`)
+**Test coverage:** 192 tests in three suites:
+- `KillSwitchTest` (128): manager, each detector, false positives (README.txt, password databases, small deletion bursts), edge cases, renames, thread safety, real encrypted sample files (`test/data/encrypted/`)
+- `FormatSignatureDetectorTest` (38): synthetic PNG/ZIP/PDF/JPEG/MP3/text files, chunked and tail-only corruption, decoys
+- `KillSwitchScenariosTest` (26): full attack simulations and benign workloads against a sandbox of realistic files
+
+### Try an attack on the real client
+
+`test/scripts/simulate-ransomware.py` (Python 3, no dependencies) only ever touches a folder named `sentinel-sandbox` and keeps a backup of what it seeded in your temp directory:
+
+```bash
+# 1. Create <your Nextcloud folder>/sentinel-sandbox and seed it, then let the client sync
+py test/scripts/simulate-ransomware.py seed "C:\Users\you\Nextcloud\sentinel-sandbox" --yes
+
+# 2. Attack it the way a real family would (rename, inplace, header, chunked, delete-recreate, notes, canary, mass-delete)
+py test/scripts/simulate-ransomware.py attack --mode header "C:\Users\you\Nextcloud\sentinel-sandbox" --yes
+
+# 3. Watch the client pause and alert; reset the Kill Switch in Settings > Kill Switch, then restore the sandbox
+py test/scripts/simulate-ransomware.py reset "C:\Users\you\Nextcloud\sentinel-sandbox" --yes
+```
+
+Use a test account, or at least check that versioning and the trash bin are enabled on your server first.
 
 ---
 
@@ -236,9 +276,8 @@ We're a small team with a big vision. If you believe sync clients should protect
 # Create a feature branch
 git checkout -b feature/my-feature
 
-# Make changes and test
-./build-wsl.sh --docker
-cd build-docker && ctest -R KillSwitch
+# Make changes and test (Windows: admin/win/scripts/compile-sentinel.ps1 -Build)
+cd build && ctest -R "KillSwitch|FormatSignature"
 
 # Submit a PR
 ```

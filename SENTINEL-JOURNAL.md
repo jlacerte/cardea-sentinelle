@@ -1,5 +1,81 @@
 # Nextcloud Sentinel Edition - Development Journal
 
+## 2026-10-15 (PM) - Chiffrement en place : recherche, plan et implémentation par sous-agents
+
+### Recherche (deux agents, sources citées dans les rapports)
+
+- Toutes les grandes familles 2022-2026 renomment les fichiers, et la plupart
+  (LockBit 3/4, BlackCat, Qilin, Black Basta, RansomHub) avec une extension
+  **aléatoire par victime** (7-12 caractères) qu'aucune liste fixe ne contient.
+  Les notes de rançon ne sont pas toujours déposées dans chaque dossier.
+- Le chiffrement partiel (LockBit 2/3 : 4 premiers Ko ; Black Basta : 64 o
+  sur 192 ; Akira : première moitié ; Play/RansomHub : blocs de 1 Mo alternés)
+  touche presque toujours l'en-tête, mais pas toujours.
+- La validation structurelle des conteneurs (ZIP, PDF, PNG) bat les
+  statistiques d'entropie sur les formats compressés (Rhea, 2026 : 0 faux
+  positif sur ~1 300 fichiers bénins) ; le χ² et l'entropie seuls donnent
+  jusqu'à 92 % de faux positifs sur LZMA.
+- Côté serveur Nextcloud 28-31 : versions + corbeille seulement. Les versions
+  ne peuvent pas dépasser 50 % de l'espace libre de l'utilisateur ; un
+  chiffrement massif double l'espace occupé et peut faire purger les versions
+  saines si le quota est serré. Les apps `ransomware_protection` et
+  `ransomware_detection` sont abandonnées.
+
+### Implémenté (4 sous-agents, fichiers disjoints, relus et testés par l'orchestrateur)
+
+1. **FormatSignatureDetector** : signatures de ~90 extensions + queue
+   structurelle (EOCD ZIP, `%%EOF` PDF, `IEND` PNG) + test de « textualité »
+   pour les formats texte. Lit au plus 4 Ko + 64 Ko par fichier. Fichier
+   existant dont la signature a disparu et dont l'en-tête est aléatoire :
+   High immédiat ; nouveaux fichiers et queue seule : Medium, High à 3,
+   Critical à 6 dans la fenêtre (une archive en cours d'écriture ressemble à
+   une queue corrompue).
+2. **PatternDetector** : extensions aléatoires (forme + liste blanche des
+   vraies extensions longues), renommage qui ajoute un suffixe, corroboration
+   par la suppression de l'original dans la fenêtre, notes de rançon LockBit 3
+   (`<ID>.README.txt` avec ID validé aléatoire), BlackCat, Qilin, Akira,
+   Medusa, RansomHub, Clop, BlackSuit. Correction du double comptage du
+   fichier courant.
+3. **SentinelController (GUI)** : pause réelle de tous les dossiers non déjà
+   en pause par l'utilisateur, arrêt des syncs en cours, dialogue d'alerte
+   non bloquant, reprise des seuls dossiers mis en pause par le contrôleur au
+   reset, pause des dossiers ajoutés pendant le déclenchement. L'état
+   déclenché est persisté : un client tué puis relancé ré-arme le switch au
+   lieu de reprendre l'envoi.
+4. **Scénarios de bout en bout + simulateur** : `testkillswitchscenarios.cpp`
+   (26 tests) et `test/scripts/simulate-ransomware.py` (verrouillé sur un
+   dossier `sentinel-sandbox`, sauvegarde hors du dossier synchronisé).
+
+### Résultats des scénarios (5 détecteurs, réglages par défaut)
+
+| Attaque | Résultat |
+|---|---|
+| Renommage extension aléatoire | pause après 2 fichiers (0 si l'original est supprimé dans la même passe) |
+| Chiffrement en place complet | 1er fichier |
+| En-tête seul (4 Ko) | 1er fichier |
+| Blocs 1 Mo alternés, premier bloc touché | 1er fichier |
+| Queue seule, en-tête intact | après 2 fichiers |
+| Suppression + recréation `.locked` | 1er fichier |
+| Note de rançon | immédiat |
+| Canari | immédiat |
+| Suppression massive | 10e fichier |
+
+Aucun scénario bénin (25 photos, archives, édition texte, sauvegarde
+`.kdbx`, 5 suppressions, renommages légitimes, copies de conflit, nouveau
+`README.txt`, remplacement de PDF par des PDF valides) ne déclenche.
+
+**Trous résiduels identifiés** : chiffrement par blocs épargnant à la fois
+l'en-tête et la queue structurelle (ex. seul le mégaoctet du milieu), et
+dégâts en queue seule sur les formats sans trailer (`.jpg`, `.mp4`).
+Prochaine étape : échantillonnage par blocs aux frontières de 1 Mo avec
+validation de structure (marqueurs JPEG, atomes MP4) plutôt que statistique.
+
+Tests : 128 + 38 + 26 = 192. Le client complet n'a toujours pas pu être
+compilé dans cet environnement : `sentinelcontroller.*`, `application.cpp`
+restent à compiler sur le poste Windows.
+
+---
+
 ## 2026-10-15 - Revue du prototype et correctifs de fond
 
 ### Constat
