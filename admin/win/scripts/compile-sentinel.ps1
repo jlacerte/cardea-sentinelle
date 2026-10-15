@@ -255,7 +255,7 @@ function Test-Prerequisites {
     # Check Inkscape: cmake/modules/GenerateIconsUtils.cmake needs an SVG
     # converter (inkscape or rsvg-convert) and fails the configure step without it.
     $inkscapeDir = "C:\Program Files\Inkscape\bin"
-    if (Test-Command "inkscape" -or Test-Command "rsvg-convert") {
+    if ((Test-Command "inkscape") -or (Test-Command "rsvg-convert")) {
         Write-Step "SVG converter found (Inkscape / rsvg-convert)"
     } elseif (Test-Path "$inkscapeDir\inkscape.exe") {
         Write-Step "Inkscape found at $inkscapeDir (added to PATH for this build)"
