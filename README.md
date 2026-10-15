@@ -30,7 +30,7 @@ We're building something new: a Nextcloud sync client that fights back against r
 | Core Kill Switch engine | ✅ Complete |
 | Threat detectors (4 types) | ✅ Complete |
 | Desktop UI (Settings + Alerts) | ✅ Complete |
-| Test suite (81 tests) | ✅ Complete |
+| Test suite (118 tests) | ✅ Complete |
 | Windows build pipeline | ✅ Complete |
 | Linux build pipeline | ✅ Complete |
 | Android client | ⏳ Planned |
@@ -209,11 +209,12 @@ src/libsync/killswitch/
 cd build && ctest -R KillSwitch --output-on-failure
 ```
 
-**Test coverage:** 81 tests covering:
-- False positive scenarios
-- Edge cases (empty files, long paths, unicode)
+**Test coverage:** 118 tests covering:
+- False positive scenarios (README.txt, password databases, small deletion bursts)
+- Edge cases (empty files, long paths, unicode, renames)
 - Thread safety
 - Cache and timing
+- Real encrypted sample files (`test/data/encrypted/`)
 
 ---
 
