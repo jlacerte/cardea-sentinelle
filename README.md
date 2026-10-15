@@ -244,7 +244,10 @@ cd build && ctest -R "KillSwitch|FormatSignature" --output-on-failure
 `test/scripts/simulate-ransomware.py` (Python 3, no dependencies) only ever touches a folder named `sentinel-sandbox` and keeps a backup of what it seeded in your temp directory:
 
 ```bash
-# 1. Create <your Nextcloud folder>/sentinel-sandbox and seed it, then let the client sync
+# 0. Build the "NextcloudDev" variant so it cannot see your real client's accounts and folders:
+#    admin\win\scripts\compile-sentinel.ps1 -Dev -Configure -Build  ->  build-windows-Release-dev\bin\nextclouddev.exe
+#    (it has its own config folder and runs next to the standard client; add a TEST account to it)
+# 1. Create <the dev client's sync folder>/sentinel-sandbox and seed it, then let the client sync
 py test/scripts/simulate-ransomware.py seed "C:\Users\you\Nextcloud\sentinel-sandbox" --yes
 
 # 2. Attack it the way a real family would (rename, inplace, header, chunked, delete-recreate, notes, canary, mass-delete)
@@ -254,7 +257,7 @@ py test/scripts/simulate-ransomware.py attack --mode header "C:\Users\you\Nextcl
 py test/scripts/simulate-ransomware.py reset "C:\Users\you\Nextcloud\sentinel-sandbox" --yes
 ```
 
-Use a test account, or at least check that versioning and the trash bin are enabled on your server first.
+Use a test account, or at least check that versioning and the trash bin are enabled on your server first. Never run the non-dev build while the standard Nextcloud client is installed: they share the executable name, the single-instance lock and the configuration folder, so it would either defer to the running client or take over your real accounts.
 
 ---
 

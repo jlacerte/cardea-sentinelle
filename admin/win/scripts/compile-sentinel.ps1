@@ -3,7 +3,13 @@
 # SPDX-FileCopyrightText: 2026 Nextcloud Sentinel Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# Usage: .\build-sentinel.ps1 [-BuildType Release|Debug] [-Clean] [-Configure] [-Build] [-Test]
+# Usage: .\compile-sentinel.ps1 [-BuildType Release|Debug] [-Clean] [-Configure] [-Build] [-Test] [-Dev]
+#
+# -Dev builds the "NextcloudDev" variant: separate executable (nextclouddev.exe),
+# separate configuration folder (%APPDATA%\NextcloudDev) and separate
+# single-instance lock, so it can run next to the standard Nextcloud client
+# and never picks up its accounts and sync folders. Use it for every test
+# session. The build directory gets a "-dev" suffix.
 
 param(
     [ValidateSet("Release", "Debug", "RelWithDebInfo")]
@@ -14,6 +20,7 @@ param(
     [switch]$Build,
     [switch]$Test,
     [switch]$All,
+    [switch]$Dev,
 
     [string]$QtPath = "",
     [string]$Generator = "Ninja",
@@ -28,8 +35,9 @@ $ProgressPreference = "SilentlyContinue"
 # ============================================================================
 
 $Script:SourceDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
-$Script:BuildDir = Join-Path $Script:SourceDir "build-windows-$BuildType"
-$Script:InstallDir = Join-Path $Script:SourceDir "install-windows-$BuildType"
+$Script:VariantSuffix = if ($Dev) { "-dev" } else { "" }
+$Script:BuildDir = Join-Path $Script:SourceDir "build-windows-$BuildType$Script:VariantSuffix"
+$Script:InstallDir = Join-Path $Script:SourceDir "install-windows-$BuildType$Script:VariantSuffix"
 
 # Default Qt paths to search
 $Script:QtSearchPaths = @(
@@ -270,6 +278,13 @@ function Invoke-Configure {
             "-DBUILD_UPDATER=ON",
             "-DWITH_CRASHREPORTER=OFF"
         )
+
+        if ($Dev) {
+            # NextcloudDev identity: own exe name, own config folder, own
+            # single-instance lock. Safe to run next to the real client.
+            $cmakeArgs += "-DNEXTCLOUD_DEV=ON"
+            Write-Step "Dev variant: building nextclouddev.exe (separate config folder)"
+        }
 
         # Add Ninja-specific options
         if ($Script:Generator -eq "Ninja") {
