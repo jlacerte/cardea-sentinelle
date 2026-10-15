@@ -63,9 +63,11 @@ bool CanaryDetector::isCanaryFile(const QString &filePath) const
 }
 
 ThreatInfo CanaryDetector::analyze(const SyncFileItem &item,
-                                    const QVector<struct KillSwitchManager::Event> &recentEvents)
+                                    const QVector<struct KillSwitchManager::Event> &recentEvents,
+                                    const AnalysisContext &context)
 {
     Q_UNUSED(recentEvents)
+    Q_UNUSED(context)
 
     ThreatInfo result;
     result.level = ThreatLevel::None;
@@ -75,8 +77,12 @@ ThreatInfo CanaryDetector::analyze(const SyncFileItem &item,
         return result;
     }
 
-    // Check if this is a canary file
-    if (!isCanaryFile(item._file)) {
+    // Check if this is a canary file. For a rename, both the source and the
+    // target name matter: renaming "_canary.txt" to "_canary.txt.locked" is
+    // exactly what we are here for.
+    const bool sourceIsCanary = isCanaryFile(item._file);
+    const bool targetIsCanary = !item._renameTarget.isEmpty() && isCanaryFile(item._renameTarget);
+    if (!sourceIsCanary && !targetIsCanary) {
         return result;
     }
 

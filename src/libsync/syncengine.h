@@ -359,9 +359,6 @@ private:
     QScopedPointer<SyncFileStatusTracker> _syncFileStatusTracker;
     Utility::StopWatch _stopWatch;
 
-    // Nextcloud Sentinel - Kill Switch Manager
-    QScopedPointer<KillSwitchManager> _killSwitchManager;
-
     /**
      * check if we are allowed to propagate everything, and if we are not, adjust the instructions
      * to recover

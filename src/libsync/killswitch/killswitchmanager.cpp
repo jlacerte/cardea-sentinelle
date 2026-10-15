@@ -8,14 +8,16 @@
 #include "killswitchmanager.h"
 #include "threatdetector.h"
 #include "actions/syncaction.h"
+#include "actions/backupaction.h"
+#include "detectors/canarydetector.h"
+#include "detectors/entropydetector.h"
+#include "detectors/massdeletedetector.h"
 #include "syncfileitem.h"
-#include "logger.h"
 
 #include <QLoggingCategory>
 #include <QMutexLocker>
-#include <QtConcurrent>
-#include <QFutureSynchronizer>
 #include <algorithm>
+#include <utility>
 
 namespace OCC {
 
@@ -26,6 +28,12 @@ KillSwitchManager *KillSwitchManager::s_instance = nullptr;
 KillSwitchManager::KillSwitchManager(QObject *parent)
     : QObject(parent)
 {
+    if (s_instance && s_instance != this) {
+        // A second manager silently stealing the singleton slot means the
+        // GUI, the logger and the sync engines no longer talk to the same
+        // object. Only unit tests should ever get here.
+        qCWarning(lcKillSwitch) << "A KillSwitchManager already exists - replacing the global instance";
+    }
     s_instance = this;
 
     // Setup window timer for event expiration
@@ -67,36 +75,51 @@ void KillSwitchManager::setEnabled(bool enabled)
 
 bool KillSwitchManager::isTriggered() const
 {
+    QMutexLocker locker(&m_mutex);
     return m_triggered;
 }
 
 ThreatLevel KillSwitchManager::currentThreatLevel() const
 {
+    QMutexLocker locker(&m_mutex);
     return m_threatLevel;
 }
 
 void KillSwitchManager::registerDetector(std::shared_ptr<ThreatDetector> detector)
 {
+    if (!detector) {
+        return;
+    }
+    QMutexLocker locker(&m_mutex);
     m_detectors.append(detector);
     qCInfo(lcKillSwitch) << "Registered detector:" << detector->name();
 }
 
 void KillSwitchManager::registerAction(std::shared_ptr<SyncAction> action)
 {
+    if (!action) {
+        return;
+    }
+    QMutexLocker locker(&m_mutex);
     m_actions.append(action);
     qCInfo(lcKillSwitch) << "Registered action:" << action->name();
 }
 
-bool KillSwitchManager::analyzeItem(const SyncFileItem &item)
+bool KillSwitchManager::analyzeItem(const SyncFileItem &item, const AnalysisContext &context)
 {
-    if (!m_enabled || m_triggered) {
-        return m_triggered; // Block if already triggered
+    if (!m_enabled) {
+        return false;
     }
 
     QMutexLocker locker(&m_mutex);
 
+    if (m_triggered) {
+        return true; // Block everything until the user resets
+    }
+
     // Record the event
     QString eventType;
+    QString eventPath = item._file;
     switch (item._instruction) {
     case CSYNC_INSTRUCTION_REMOVE:
         eventType = QStringLiteral("DELETE");
@@ -108,51 +131,53 @@ bool KillSwitchManager::analyzeItem(const SyncFileItem &item)
     case CSYNC_INSTRUCTION_CONFLICT:
         eventType = QStringLiteral("MODIFY");
         break;
+    case CSYNC_INSTRUCTION_RENAME:
+        // Ransomware commonly renames "report.docx" to "report.docx.locked".
+        // The interesting name is the rename target.
+        eventType = QStringLiteral("RENAME");
+        if (!item._renameTarget.isEmpty()) {
+            eventPath = item._renameTarget;
+        }
+        break;
     default:
         return false; // No threat from other operations
     }
 
-    recordEvent(eventType, item._file);
+    recordEvent(eventType, eventPath);
 
-    // Run all detectors in parallel for better performance
-    // Take a local copy of events for thread-safe access
-    QVector<Event> events = m_recentEvents;
+    // Detectors run sequentially on purpose: three of the four are a few
+    // microseconds of string matching, only the entropy detector does I/O,
+    // and the caller has to wait for all of them anyway. Dispatching four
+    // thread-pool tasks per sync item costs far more than it saves and the
+    // detectors are not written to be used from several threads at once.
+    const QVector<Event> events = m_recentEvents;
 
-    QVector<QFuture<ThreatInfo>> futures;
-    futures.reserve(m_detectors.size());
-
-    for (const auto &detector : m_detectors) {
-        futures.append(QtConcurrent::run([detector, &item, events]() {
-            return detector->analyze(item, events);
-        }));
-    }
-
-    // Collect results from all detectors
     ThreatInfo highestThreat;
-    highestThreat.level = ThreatLevel::None;
 
-    for (auto &future : futures) {
-        ThreatInfo threat = future.result();
-        if (threat.level != ThreatLevel::None) {
-            threat.timestamp = QDateTime::currentDateTime();
-            m_threats.append(threat);
+    for (const auto &detector : std::as_const(m_detectors)) {
+        ThreatInfo threat = detector->analyze(item, events, context);
+        if (threat.level == ThreatLevel::None) {
+            continue;
+        }
 
-            qCWarning(lcKillSwitch) << "Threat detected by" << threat.detectorName
-                                    << "- Level:" << static_cast<int>(threat.level)
-                                    << "- " << threat.description;
+        threat.timestamp = QDateTime::currentDateTime();
+        m_threats.append(threat);
 
-            emit threatDetected(threat);
+        qCWarning(lcKillSwitch) << "Threat detected by" << threat.detectorName
+                                << "- Level:" << static_cast<int>(threat.level)
+                                << "- " << threat.description;
 
-            // Track highest threat level found
-            if (threat.level > highestThreat.level) {
-                highestThreat = threat;
-            }
+        emit threatDetected(threat);
+
+        // Track highest threat level found
+        if (threat.level > highestThreat.level) {
+            highestThreat = threat;
         }
     }
 
     // Trigger on highest threat if High or Critical
     if (highestThreat.level >= ThreatLevel::High) {
-        trigger(highestThreat.description);
+        trigger(highestThreat);
         return true; // Block this item
     }
 
@@ -160,7 +185,7 @@ bool KillSwitchManager::analyzeItem(const SyncFileItem &item)
     return false;
 }
 
-bool KillSwitchManager::analyzeBatch(const QVector<SyncFileItem> &items)
+bool KillSwitchManager::analyzeBatch(const QVector<SyncFileItem> &items, const AnalysisContext &context)
 {
     if (!m_enabled) {
         return false;
@@ -182,41 +207,52 @@ bool KillSwitchManager::analyzeBatch(const QVector<SyncFileItem> &items)
 
     // Analyze each item
     for (const auto &item : items) {
-        if (analyzeItem(item)) {
+        if (analyzeItem(item, context)) {
             return true;
         }
     }
 
-    return m_triggered;
+    return isTriggered();
 }
 
 void KillSwitchManager::trigger(const QString &reason)
 {
-    if (m_triggered) {
-        return; // Already triggered
-    }
-
-    QMutexLocker locker(&m_mutex);
-
-    m_triggered = true;
-    m_threatLevel = ThreatLevel::Critical;
-
-    qCCritical(lcKillSwitch) << "!!! KILL SWITCH TRIGGERED !!!";
-    qCCritical(lcKillSwitch) << "Reason:" << reason;
-
-    // Create threat info for this trigger
     ThreatInfo threat;
     threat.level = ThreatLevel::Critical;
     threat.detectorName = QStringLiteral("KillSwitchManager");
     threat.description = reason;
     threat.timestamp = QDateTime::currentDateTime();
+    trigger(threat);
+}
+
+void KillSwitchManager::trigger(const ThreatInfo &threat)
+{
+    QMutexLocker locker(&m_mutex);
+
+    if (m_triggered) {
+        return; // Already triggered
+    }
+
+    m_triggered = true;
+    m_threatLevel = ThreatLevel::Critical;
+
+    qCCritical(lcKillSwitch) << "!!! KILL SWITCH TRIGGERED !!!";
+    qCCritical(lcKillSwitch) << "Reason:" << threat.description
+                             << "- Detector:" << threat.detectorName
+                             << "- Files:" << threat.affectedFiles.size();
+
+    ThreatInfo triggerInfo = threat;
+    triggerInfo.level = ThreatLevel::Critical;
+    if (!triggerInfo.timestamp.isValid()) {
+        triggerInfo.timestamp = QDateTime::currentDateTime();
+    }
 
     // Execute all registered actions
-    executeActions(threat);
+    executeActions(triggerInfo);
 
     emit triggeredChanged(true);
     emit threatLevelChanged(m_threatLevel);
-    emit syncPaused(reason);
+    emit syncPaused(triggerInfo.description);
 }
 
 void KillSwitchManager::reset()
@@ -237,33 +273,73 @@ void KillSwitchManager::reset()
 
 QVector<ThreatInfo> KillSwitchManager::threats() const
 {
+    QMutexLocker locker(&m_mutex);
     return m_threats;
 }
 
 void KillSwitchManager::setDeleteThreshold(int count, int windowSeconds)
 {
-    m_deleteThreshold = count;
-    m_windowSeconds = windowSeconds;
-    qCInfo(lcKillSwitch) << "Delete threshold set to" << count << "files in" << windowSeconds << "seconds";
+    QMutexLocker locker(&m_mutex);
+    m_deleteThreshold = qMax(1, count);
+    m_windowSeconds = qMax(1, windowSeconds);
+    for (const auto &detector : std::as_const(m_detectors)) {
+        if (auto *massDelete = dynamic_cast<MassDeleteDetector *>(detector.get())) {
+            massDelete->setThreshold(m_deleteThreshold);
+        }
+    }
+    qCInfo(lcKillSwitch) << "Delete threshold set to" << m_deleteThreshold << "files in" << m_windowSeconds << "seconds";
 }
 
 void KillSwitchManager::setEntropyThreshold(double threshold)
 {
+    QMutexLocker locker(&m_mutex);
     m_entropyThreshold = threshold;
+    for (const auto &detector : std::as_const(m_detectors)) {
+        if (auto *entropy = dynamic_cast<EntropyDetector *>(detector.get())) {
+            entropy->setSuspiciousEntropyThreshold(threshold);
+        }
+    }
     qCInfo(lcKillSwitch) << "Entropy threshold set to" << threshold;
 }
 
 void KillSwitchManager::addCanaryFile(const QString &filename)
 {
+    if (filename.trimmed().isEmpty()) {
+        return;
+    }
+    QMutexLocker locker(&m_mutex);
     if (!m_canaryFiles.contains(filename)) {
         m_canaryFiles.append(filename);
         qCInfo(lcKillSwitch) << "Added canary file:" << filename;
     }
+    for (const auto &detector : std::as_const(m_detectors)) {
+        if (auto *canary = dynamic_cast<CanaryDetector *>(detector.get())) {
+            canary->addCanaryPattern(filename);
+        }
+    }
+}
+
+void KillSwitchManager::removeCanaryFile(const QString &filename)
+{
+    QMutexLocker locker(&m_mutex);
+    m_canaryFiles.removeAll(filename);
+    for (const auto &detector : std::as_const(m_detectors)) {
+        if (auto *canary = dynamic_cast<CanaryDetector *>(detector.get())) {
+            canary->removeCanaryPattern(filename);
+        }
+    }
+    qCInfo(lcKillSwitch) << "Removed canary file:" << filename;
 }
 
 void KillSwitchManager::setAutoBackup(bool enabled)
 {
+    QMutexLocker locker(&m_mutex);
     m_autoBackup = enabled;
+    for (const auto &action : std::as_const(m_actions)) {
+        if (auto *backup = dynamic_cast<BackupAction *>(action.get())) {
+            backup->setEnabled(enabled);
+        }
+    }
     qCInfo(lcKillSwitch) << "Auto-backup" << (enabled ? "enabled" : "disabled");
 }
 
@@ -283,7 +359,7 @@ void KillSwitchManager::evaluateThreatLevel()
 {
     // Count recent deletions
     int deleteCount = 0;
-    for (const auto &event : m_recentEvents) {
+    for (const auto &event : std::as_const(m_recentEvents)) {
         if (event.type == QStringLiteral("DELETE")) {
             deleteCount++;
         }
@@ -315,7 +391,10 @@ void KillSwitchManager::evaluateThreatLevel()
 
 void KillSwitchManager::executeActions(const ThreatInfo &threat)
 {
-    for (const auto &action : m_actions) {
+    for (const auto &action : std::as_const(m_actions)) {
+        if (!action->isEnabled()) {
+            continue;
+        }
         qCInfo(lcKillSwitch) << "Executing action:" << action->name();
         action->execute(threat);
     }

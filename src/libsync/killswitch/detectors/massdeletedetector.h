@@ -20,7 +20,8 @@ namespace OCC {
  *
  * Detection criteria:
  * - Number of deletions exceeding threshold in time window
- * - Rapid deletion rate (files per second)
+ * - Sustained deletion rate (files per second) once a minimum number of
+ *   deletions has been seen over at least one second
  * - Deletion of entire directory trees
  *
  * Whitelisted directories (not counted as suspicious):
@@ -34,11 +35,14 @@ public:
 
     QString name() const override { return QStringLiteral("MassDeleteDetector"); }
 
+    using ThreatDetector::analyze;
     ThreatInfo analyze(const SyncFileItem &item,
-                       const QVector<struct KillSwitchManager::Event> &recentEvents) override;
+                       const QVector<struct KillSwitchManager::Event> &recentEvents,
+                       const AnalysisContext &context) override;
 
     // Configuration
-    void setThreshold(int count) { m_threshold = count; }
+    void setThreshold(int count) { m_threshold = qMax(1, count); }
+    int threshold() const { return m_threshold; }
     void setRateLimit(double filesPerSecond) { m_rateLimit = filesPerSecond; }
 
     /**
@@ -73,6 +77,11 @@ private:
     int m_threshold = 10;         // Number of deletions to trigger
     double m_rateLimit = 5.0;     // Max deletions per second before alert
     QSet<QString> m_whitelistedDirs; // Directories to ignore
+
+    // The rate rule needs a minimum amount of evidence: a sync run hands us
+    // its items within a few milliseconds, so "2 files in 1 ms" is not a
+    // 2000 files/s attack.
+    static constexpr qint64 MIN_RATE_WINDOW_MS = 1000;
 };
 
 } // namespace OCC

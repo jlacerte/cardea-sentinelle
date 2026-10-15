@@ -26,10 +26,6 @@
 
 // Nextcloud Sentinel - Kill Switch
 #include "killswitch/killswitchmanager.h"
-#include "killswitch/detectors/massdeletedetector.h"
-#include "killswitch/detectors/entropydetector.h"
-#include "killswitch/detectors/canarydetector.h"
-#include "killswitch/detectors/patterndetector.h"
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -108,26 +104,22 @@ SyncEngine::SyncEngine(AccountPtr account,
 
     _syncFileStatusTracker.reset(new SyncFileStatusTracker(this));
 
-    // Nextcloud Sentinel - Initialize Kill Switch Manager
-    _killSwitchManager.reset(new KillSwitchManager(this));
-
-    // Register threat detectors - order optimized for performance:
-    // 1. PatternDetector - regex only, no file I/O (fastest)
-    // 2. CanaryDetector - path comparison only
-    // 3. MassDeleteDetector - event counting
-    // 4. EntropyDetector - reads file content (slowest)
-    _killSwitchManager->registerDetector(std::make_shared<PatternDetector>());
-    _killSwitchManager->registerDetector(std::make_shared<CanaryDetector>());
-    _killSwitchManager->registerDetector(std::make_shared<MassDeleteDetector>());
-    _killSwitchManager->registerDetector(std::make_shared<EntropyDetector>());
-
-    // Connect kill switch signals
-    connect(_killSwitchManager.data(), &KillSwitchManager::syncPaused,
-            this, &SyncEngine::slotKillSwitchTriggered);
-    connect(_killSwitchManager.data(), &KillSwitchManager::threatDetected,
-            this, &SyncEngine::slotKillSwitchThreatDetected);
-
-    qCInfo(lcEngine) << "Nextcloud Sentinel: Kill Switch protection enabled";
+    // Nextcloud Sentinel - Kill Switch
+    // The manager is process-wide (created by the application, with its
+    // detectors, logger, backup action and notifications attached). Every
+    // sync engine feeds the same manager so that an attack spread over
+    // several folders is seen as one event stream. Without an application
+    // (nextcloudcmd, upstream unit tests) there is no manager and the engine
+    // behaves like the upstream client.
+    if (auto *killSwitch = KillSwitchManager::instance()) {
+        connect(killSwitch, &KillSwitchManager::syncPaused,
+                this, &SyncEngine::slotKillSwitchTriggered);
+        connect(killSwitch, &KillSwitchManager::threatDetected,
+                this, &SyncEngine::slotKillSwitchThreatDetected);
+        qCInfo(lcEngine) << "Nextcloud Sentinel: Kill Switch protection enabled for" << localPath;
+    } else {
+        qCInfo(lcEngine) << "Nextcloud Sentinel: no Kill Switch manager, protection disabled for" << localPath;
+    }
 
     _clearTouchedFilesTimer.setSingleShot(true);
     _clearTouchedFilesTimer.setInterval(30 * 1000);
@@ -1188,12 +1180,13 @@ bool SyncEngine::handleMassDeletion()
 // Nextcloud Sentinel - Kill Switch Analysis
 bool SyncEngine::handleKillSwitchAnalysis()
 {
-    if (!_killSwitchManager || !_killSwitchManager->isEnabled()) {
+    auto *killSwitch = KillSwitchManager::instance();
+    if (!killSwitch || !killSwitch->isEnabled()) {
         return false;
     }
 
     // If already triggered, block sync
-    if (_killSwitchManager->isTriggered()) {
+    if (killSwitch->isTriggered()) {
         qCWarning(lcEngine) << "Sentinel: Kill Switch already triggered, blocking sync";
         Q_EMIT syncError(tr("Sync blocked: Kill Switch protection is active. Please review the threat alerts."),
                          ErrorCategory::GenericError);
@@ -1202,6 +1195,9 @@ bool SyncEngine::handleKillSwitchAnalysis()
     }
 
     qCInfo(lcEngine) << "Sentinel: Analyzing" << _syncItems.size() << "items for threats";
+
+    // Items carry sync-relative paths; detectors that read the file need the folder root.
+    const AnalysisContext context{_localPath};
 
     // Analyze each sync item
     int deleteCount = 0;
@@ -1218,16 +1214,20 @@ bool SyncEngine::handleKillSwitchAnalysis()
         }
 
         // Run through kill switch analysis
-        if (_killSwitchManager->analyzeItem(*item)) {
+        if (killSwitch->analyzeItem(*item, context)) {
             suspiciousCount++;
         }
 
         // Check if kill switch was triggered during analysis
-        if (_killSwitchManager->isTriggered()) {
+        if (killSwitch->isTriggered()) {
             qCCritical(lcEngine) << "Sentinel: KILL SWITCH TRIGGERED during analysis!";
             Q_EMIT syncError(tr("Kill Switch triggered: Potential threat detected. Sync has been paused."),
                              ErrorCategory::GenericError);
-            finalize(false);
+            // The manager's syncPaused signal already reached slotKillSwitchTriggered,
+            // which aborted (and thereby finalized) this run. Do not finalize twice.
+            if (_syncRunning) {
+                finalize(false);
+            }
             return true;
         }
     }
@@ -1236,7 +1236,7 @@ bool SyncEngine::handleKillSwitchAnalysis()
                      << "Deletes:" << deleteCount
                      << "Modifies:" << modifyCount
                      << "Suspicious:" << suspiciousCount
-                     << "Threat Level:" << static_cast<int>(_killSwitchManager->currentThreatLevel());
+                     << "Threat Level:" << static_cast<int>(killSwitch->currentThreatLevel());
 
     return false;
 }

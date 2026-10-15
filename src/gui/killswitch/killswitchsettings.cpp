@@ -304,6 +304,11 @@ void KillSwitchSettings::slotRemoveCanaryFile()
     if (item) {
         QString filename = item->text();
         delete _ui->canaryListWidget->takeItem(_ui->canaryListWidget->row(item));
+
+        if (auto *manager = KillSwitchManager::instance()) {
+            manager->removeCanaryFile(filename);
+        }
+
         saveSettings();
         qCInfo(lcKillSwitchSettings) << "Removed canary file:" << filename;
     }

@@ -26,6 +26,13 @@ namespace OCC {
  * - Multiple files with ransomware extensions: High threat
  * - Ransom note file detected: Critical threat (immediate trigger)
  * - Double extension pattern: Medium/High threat depending on count
+ *
+ * New, modified and renamed files are inspected (for a rename, the target
+ * name is what matters: "report.docx" -> "report.docx.locked").
+ *
+ * Ransom note patterns deliberately require a ransom-specific keyword:
+ * a plain README.txt or warning.txt exists in countless legitimate folders
+ * and must never pause the sync on its own.
  */
 class OWNCLOUDSYNC_EXPORT PatternDetector : public ThreatDetector
 {
@@ -34,8 +41,10 @@ public:
 
     QString name() const override { return QStringLiteral("PatternDetector"); }
 
+    using ThreatDetector::analyze;
     ThreatInfo analyze(const SyncFileItem &item,
-                       const QVector<struct KillSwitchManager::Event> &recentEvents) override;
+                       const QVector<struct KillSwitchManager::Event> &recentEvents,
+                       const AnalysisContext &context) override;
 
     // Configuration
     void setThreshold(int count) { m_threshold = count; }

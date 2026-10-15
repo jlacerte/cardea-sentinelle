@@ -533,36 +533,29 @@ void Application::setupAccountsAndFolders()
         threatLogger->logThreat(pauseInfo, QStringLiteral("sync_paused"));
     });
 
-    // Connect Kill Switch to system tray notifications
+    // Connect Kill Switch to system tray notifications. Low and Medium
+    // findings are logged and shown in the settings page; a tray popup for
+    // every single ".abc" file would train users to ignore the real alerts.
     connect(killSwitch, &KillSwitchManager::threatDetected, this, [](const ThreatInfo &threat) {
-        QString title = QStringLiteral("Sentinel: Threat Detected");
-        QString message;
-        QSystemTrayIcon::MessageIcon icon = QSystemTrayIcon::Warning;
-
-        switch (threat.level) {
-        case ThreatLevel::Critical:
-            title = QStringLiteral("SENTINEL: CRITICAL THREAT");
-            icon = QSystemTrayIcon::Critical;
-            break;
-        case ThreatLevel::High:
-            title = QStringLiteral("Sentinel: High Threat");
-            icon = QSystemTrayIcon::Critical;
-            break;
-        case ThreatLevel::Medium:
-            title = QStringLiteral("Sentinel: Medium Threat");
-            icon = QSystemTrayIcon::Warning;
-            break;
-        default:
-            icon = QSystemTrayIcon::Information;
-            break;
+        if (threat.level < ThreatLevel::High) {
+            return;
         }
 
-        message = QStringLiteral("%1\nDetector: %2\nFiles: %3")
-                      .arg(threat.description)
-                      .arg(threat.detectorName)
-                      .arg(threat.affectedFiles.join(QStringLiteral(", ")));
+        const QString title = threat.level == ThreatLevel::Critical
+            ? tr("SENTINEL: CRITICAL THREAT")
+            : tr("Sentinel: High Threat");
 
-        Systray::instance()->showMessage(title, message, icon);
+        QStringList files = threat.affectedFiles;
+        const int extra = files.size() - 5;
+        if (extra > 0) {
+            files = files.mid(0, 5);
+            files << tr("... and %n more", "", extra);
+        }
+
+        const QString message = tr("%1\nDetector: %2\nFiles: %3")
+                                    .arg(threat.description, threat.detectorName, files.join(QStringLiteral(", ")));
+
+        Systray::instance()->showMessage(title, message, QSystemTrayIcon::Critical);
     });
 
     // Connect Kill Switch pause signal to systray
@@ -581,6 +574,22 @@ void Application::setupAccountsAndFolders()
     backupAction->setMaxBackupSizeMB(500);  // 500MB max
     backupAction->setRetentionDays(7);       // Keep 7 days
     killSwitch->registerAction(backupAction);
+
+    // Apply the configuration persisted by Settings > Kill Switch. Without
+    // this the manager always starts with its built-in defaults, whatever
+    // the user chose last time.
+    {
+        auto settings = ConfigFile::settingsWithGroup(QStringLiteral("KillSwitch"));
+        killSwitch->setEnabled(settings->value(QStringLiteral("enabled"), true).toBool());
+        killSwitch->setDeleteThreshold(settings->value(QStringLiteral("deleteThreshold"), 10).toInt(),
+                                       settings->value(QStringLiteral("timeWindow"), 60).toInt());
+        killSwitch->setEntropyThreshold(settings->value(QStringLiteral("entropyThreshold"), 7.5).toDouble());
+        killSwitch->setAutoBackup(settings->value(QStringLiteral("autoBackup"), true).toBool());
+        const QStringList canaryFiles = settings->value(QStringLiteral("canaryFiles")).toStringList();
+        for (const QString &canaryFile : canaryFiles) {
+            killSwitch->addCanaryFile(canaryFile);
+        }
+    }
 
     qCInfo(lcApplication) << "Kill Switch protection initialized with 4 detectors, backup action, and notifications";
 

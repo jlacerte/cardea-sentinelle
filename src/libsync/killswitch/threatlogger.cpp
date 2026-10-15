@@ -135,6 +135,9 @@ void ThreatLogger::logThreat(const ThreatInfo &threat, const QString &actionTake
     }
 
     entries.append(entry);
+    while (entries.size() > MAX_LOG_ENTRIES) {
+        entries.removeFirst();
+    }
     writeLogEntries(entries);
 
     qCInfo(lcThreatLogger) << "Logged threat:" << threat.description

@@ -37,11 +37,35 @@ enum class ThreatLevel {
  * @brief Structure describing a detected threat
  */
 struct OWNCLOUDSYNC_EXPORT ThreatInfo {
-    ThreatLevel level;
+    ThreatLevel level = ThreatLevel::None;
     QString detectorName;
     QString description;
     QStringList affectedFiles;
     QDateTime timestamp;
+};
+
+/**
+ * @brief Per-call context handed to the detectors
+ *
+ * SyncFileItem::_file is relative to the sync folder root. Detectors that
+ * need to read the file from disk (entropy analysis) or to hand a usable
+ * path to the response actions (backup) resolve it through this context.
+ */
+struct OWNCLOUDSYNC_EXPORT AnalysisContext {
+    /// Absolute path of the sync folder root (with or without trailing slash). May be empty in unit tests.
+    QString localRootPath;
+
+    /// Resolve a sync-relative path to an absolute local path. Returns the input unchanged when no root is known.
+    QString localPath(const QString &relativePath) const
+    {
+        if (localRootPath.isEmpty() || relativePath.isEmpty()) {
+            return relativePath;
+        }
+        if (localRootPath.endsWith(QLatin1Char('/')) || relativePath.startsWith(QLatin1Char('/'))) {
+            return localRootPath + relativePath;
+        }
+        return localRootPath + QLatin1Char('/') + relativePath;
+    }
 };
 
 /**
@@ -51,6 +75,10 @@ struct OWNCLOUDSYNC_EXPORT ThreatInfo {
  * to potential ransomware or mass deletion attacks. It can pause synchronization,
  * create backups, and alert the user.
  *
+ * There is exactly one manager per process (see instance()). All sync engines
+ * feed their items into it, so an attack spread across several sync folders
+ * is still seen as one event stream.
+ *
  * Architecture:
  *   KillSwitchManager
  *     ├── ThreatDetector[] (analyzers)
@@ -59,9 +87,8 @@ struct OWNCLOUDSYNC_EXPORT ThreatInfo {
  *     │   ├── CanaryDetector
  *     │   └── PatternDetector
  *     └── SyncAction[] (responses)
- *         ├── PauseSyncAction
  *         ├── BackupAction
- *         └── AlertAction
+ *         └── (sync pause / alerts are driven through signals)
  */
 class OWNCLOUDSYNC_EXPORT KillSwitchManager : public QObject
 {
@@ -73,6 +100,9 @@ class OWNCLOUDSYNC_EXPORT KillSwitchManager : public QObject
 public:
     /**
      * @brief Event structure for tracking file operations
+     *
+     * type is one of "DELETE", "CREATE", "MODIFY", "RENAME".
+     * path is the sync-relative path (for renames: the rename target).
      */
     struct Event {
         QDateTime timestamp;
@@ -84,7 +114,7 @@ public:
     ~KillSwitchManager() override;
 
     /**
-     * @brief Get the singleton instance
+     * @brief Get the singleton instance (nullptr if none was created)
      */
     static KillSwitchManager *instance();
 
@@ -110,6 +140,10 @@ public:
 
     /**
      * @brief Register a threat detector
+     *
+     * A detector keeps whatever it was configured with; the manager's own
+     * setters (setDeleteThreshold, setEntropyThreshold, addCanaryFile, ...)
+     * propagate to the registered detectors when they are called.
      */
     void registerDetector(std::shared_ptr<ThreatDetector> detector);
 
@@ -121,22 +155,32 @@ public:
     /**
      * @brief Analyze a sync item for threats
      * @param item The sync file item to analyze
+     * @param context Where the item lives on disk (sync folder root)
      * @return true if the item should be blocked
      */
-    bool analyzeItem(const SyncFileItem &item);
+    bool analyzeItem(const SyncFileItem &item, const AnalysisContext &context = AnalysisContext());
 
     /**
      * @brief Analyze a batch of sync items
      * @param items Vector of sync items to analyze
+     * @param context Where the items live on disk (sync folder root)
      * @return true if sync should be paused
      */
-    bool analyzeBatch(const QVector<SyncFileItem> &items);
+    bool analyzeBatch(const QVector<SyncFileItem> &items, const AnalysisContext &context = AnalysisContext());
 
     /**
      * @brief Manually trigger the kill switch
      * @param reason The reason for triggering
      */
     void trigger(const QString &reason);
+
+    /**
+     * @brief Trigger the kill switch for a detected threat.
+     *
+     * The threat (including its affected files) is handed to the registered
+     * actions, so e.g. the backup action knows what to back up.
+     */
+    void trigger(const ThreatInfo &threat);
 
     /**
      * @brief Reset the kill switch after user confirmation
@@ -148,11 +192,17 @@ public:
      */
     QVector<ThreatInfo> threats() const;
 
-    // Configuration
+    // Configuration (propagated to the matching detectors/actions)
     void setDeleteThreshold(int count, int windowSeconds);
+    int deleteThreshold() const { return m_deleteThreshold; }
+    int windowSeconds() const { return m_windowSeconds; }
     void setEntropyThreshold(double threshold);
+    double entropyThreshold() const { return m_entropyThreshold; }
     void addCanaryFile(const QString &filename);
+    void removeCanaryFile(const QString &filename);
+    QStringList canaryFiles() const { return m_canaryFiles; }
     void setAutoBackup(bool enabled);
+    bool autoBackup() const { return m_autoBackup; }
 
 signals:
     void enabledChanged(bool enabled);
@@ -184,7 +234,7 @@ private:
     // Event tracking
     QVector<Event> m_recentEvents;
     QTimer m_windowTimer;
-    QRecursiveMutex m_mutex;
+    mutable QRecursiveMutex m_mutex;
 
     // Configuration
     int m_deleteThreshold = 10;

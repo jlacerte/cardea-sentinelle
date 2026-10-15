@@ -133,19 +133,20 @@ void PatternDetector::initializePatterns()
 
     // Ransom note patterns (case insensitive)
     m_ransomNotePatterns = {
-        QRegularExpression(QStringLiteral("^readme.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
+        // README-style notes must carry a ransom keyword: README.txt alone is in every software project.
+        QRegularExpression(QStringLiteral("^readme.*(decrypt|restore|recover|unlock|ransom|encrypt|crypt|payment|bitcoin).*\\.(txt|html|hta)$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^how[_\\-\\s]?to[_\\-\\s]?decrypt.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^how[_\\-\\s]?to[_\\-\\s]?restore.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^how[_\\-\\s]?to[_\\-\\s]?recover.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^decrypt[_\\-\\s]?instructions.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^restore[_\\-\\s]?files.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
-        QRegularExpression(QStringLiteral("^your[_\\-\\s]?files.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
+        QRegularExpression(QStringLiteral("^your[_\\-\\s]?files.*(encrypt|lock|decrypt|restore|recover|stolen|hack).*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^files[_\\-\\s]?encrypted.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^ransom.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^_readme[_\\-]?\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^!readme!?\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^read[_\\-\\s]?me[_\\-\\s]?now.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
-        QRegularExpression(QStringLiteral("^warning.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
+        QRegularExpression(QStringLiteral("^warning.*(encrypt|decrypt|restore|recover|ransom|read[_\\-\\s]?me|files).*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^decrypt[_\\-]?all.*\\.(txt|html)$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("^unlock[_\\-]?instructions.*\\.txt$"), QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(QStringLiteral("@please_read_me@\\.txt$"), QRegularExpression::CaseInsensitiveOption),
@@ -206,20 +207,30 @@ void PatternDetector::initializePatterns()
 }
 
 ThreatInfo PatternDetector::analyze(const SyncFileItem &item,
-                                    const QVector<struct KillSwitchManager::Event> &recentEvents)
+                                    const QVector<struct KillSwitchManager::Event> &recentEvents,
+                                    const AnalysisContext &context)
 {
     ThreatInfo threat;
     threat.level = ThreatLevel::None;
     threat.detectorName = name();
 
-    // Only check new or modified files
-    if (item._instruction != CSYNC_INSTRUCTION_NEW &&
-        item._instruction != CSYNC_INSTRUCTION_SYNC) {
+    if (!m_enabled) {
         return threat;
     }
 
-    const QString filePath = item._file;
-    const QString fileName = QFileInfo(filePath).fileName();
+    // Only check new, modified or renamed files
+    if (item._instruction != CSYNC_INSTRUCTION_NEW &&
+        item._instruction != CSYNC_INSTRUCTION_SYNC &&
+        item._instruction != CSYNC_INSTRUCTION_RENAME) {
+        return threat;
+    }
+
+    // For a rename the suspicious name is the target
+    const QString relativePath = (item._instruction == CSYNC_INSTRUCTION_RENAME && !item._renameTarget.isEmpty())
+        ? item._renameTarget
+        : item._file;
+    const QString filePath = context.localPath(relativePath);
+    const QString fileName = QFileInfo(relativePath).fileName();
 
     // Check for ransom note - CRITICAL threat (immediate trigger)
     if (isRansomNote(fileName)) {
@@ -314,7 +325,8 @@ int PatternDetector::countSuspiciousFiles(const QVector<struct KillSwitchManager
     int count = 0;
     for (const auto &event : recentEvents) {
         if (event.type == QStringLiteral("CREATE") ||
-            event.type == QStringLiteral("MODIFY")) {
+            event.type == QStringLiteral("MODIFY") ||
+            event.type == QStringLiteral("RENAME")) {
             if (hasRansomwareExtension(event.path) ||
                 hasDoubleExtension(QFileInfo(event.path).fileName()) ||
                 isRansomNote(QFileInfo(event.path).fileName())) {

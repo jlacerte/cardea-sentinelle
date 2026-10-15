@@ -8,7 +8,9 @@
 #pragma once
 
 #include "../threatdetector.h"
+#include <QDateTime>
 #include <QHash>
+#include <QVector>
 
 namespace OCC {
 
@@ -20,9 +22,16 @@ namespace OCC {
  * Normal files have lower entropy depending on type.
  *
  * Detection criteria:
- * - New files with suspiciously high entropy
- * - Existing files with sudden entropy increase (indicating encryption)
- * - Patterns of multiple high-entropy file modifications
+ * - A text-like file (known extension) whose entropy is far above what its
+ *   type can produce: High on its own (a .txt at 7.6 bits/byte is encrypted).
+ * - Files of unknown type with very high entropy, or files whose entropy
+ *   jumped since we last saw them: counted over the time window. One such
+ *   file is Medium (password databases, disk images, proprietary formats are
+ *   legitimately random); several within the window escalate to High and
+ *   then Critical, which is what a running encryptor looks like.
+ *
+ * Only local changes (direction Up) are analyzed: for a download the local
+ * file is either missing or still the previous version.
  */
 class OWNCLOUDSYNC_EXPORT EntropyDetector : public ThreatDetector
 {
@@ -31,13 +40,27 @@ public:
 
     QString name() const override { return QStringLiteral("EntropyDetector"); }
 
+    using ThreatDetector::analyze;
     ThreatInfo analyze(const SyncFileItem &item,
-                       const QVector<struct KillSwitchManager::Event> &recentEvents) override;
+                       const QVector<struct KillSwitchManager::Event> &recentEvents,
+                       const AnalysisContext &context) override;
 
     // Configuration
     void setHighEntropyThreshold(double threshold) { m_highThreshold = threshold; }
     void setSuspiciousEntropyThreshold(double threshold) { m_suspiciousThreshold = threshold; }
     void setSampleSize(int bytes) { m_sampleSize = bytes; }
+
+    /**
+     * @brief Number of high-entropy files within the window needed for a High threat
+     * (twice that for Critical). Default: 3.
+     */
+    void setThreshold(int count) { m_threshold = qMax(1, count); }
+    int threshold() const { return m_threshold; }
+
+    /**
+     * @brief Time window (seconds) over which high-entropy hits are counted. Default: 60.
+     */
+    void setWindowSeconds(int seconds) { m_windowSeconds = qMax(1, seconds); }
 
     // Cache control
     void setCacheEnabled(bool enabled) { m_cacheEnabled = enabled; }
@@ -111,15 +134,25 @@ private:
     int m_sampleSize = 65536;           // 64KB sample per block
     int m_cacheMaxSize = 10000;         // LRU cache limit
     bool m_cacheEnabled = true;         // Cache enabled by default
+    int m_threshold = 3;                // High-entropy hits in window for High
+    int m_windowSeconds = 60;           // Window for counting hits
 
     // Cache of known file entropies for comparison (with LRU eviction)
     mutable QHash<QString, double> m_entropyCache;
     mutable QStringList m_cacheOrder; // For LRU eviction
 
+    // Timestamps of recent high-entropy hits (pruned to the window)
+    QVector<QDateTime> m_recentHits;
+
     /**
      * @brief Update cache with LRU eviction
      */
     void updateCache(const QString &filePath, double entropy) const;
+
+    /**
+     * @brief Record a high-entropy hit and return the number of hits in the window
+     */
+    int recordHit(const QDateTime &now);
 
     // File extensions that normally have high entropy
     static const QStringList s_highEntropyExtensions;

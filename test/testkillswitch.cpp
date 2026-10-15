@@ -11,6 +11,8 @@
 #include <QFutureSynchronizer>
 #include <QThread>
 #include <QElapsedTimer>
+#include <QRandomGenerator>
+#include <QTemporaryDir>
 
 #include "libsync/killswitch/killswitchmanager.h"
 #include "libsync/killswitch/detectors/massdeletedetector.h"
@@ -28,6 +30,18 @@ class TestKillSwitch : public QObject
 
 private:
     KillSwitchManager *_manager = nullptr;
+
+    static void writeRandomFile(const QString &path, int size)
+    {
+        QByteArray data(size, Qt::Uninitialized);
+        for (int i = 0; i < size; i++) {
+            data[i] = static_cast<char>(QRandomGenerator::global()->bounded(256));
+        }
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(data), static_cast<qint64>(size));
+        file.close();
+    }
 
 private slots:
     void initTestCase()
@@ -109,6 +123,108 @@ private slots:
 
         // Should only trigger once
         QCOMPARE(triggeredSpy.count(), 1);
+    }
+
+    void testManagerAnalyzesRenames()
+    {
+        _manager->registerDetector(std::make_shared<CanaryDetector>());
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_RENAME;
+        item._file = "_canary.txt";
+        item._renameTarget = "_canary.txt.encrypted";
+
+        QVERIFY(_manager->analyzeItem(item));
+        QVERIFY(_manager->isTriggered());
+    }
+
+    void testManagerTriggerPassesAffectedFilesToActions()
+    {
+        // The backup action can only back up what it is told about: the
+        // threat that trips the switch must reach the actions intact.
+        struct RecordingAction : public SyncAction {
+            QString name() const override { return QStringLiteral("RecordingAction"); }
+            void execute(const ThreatInfo &threat) override { received.append(threat); }
+            QVector<ThreatInfo> received;
+        };
+
+        auto action = std::make_shared<RecordingAction>();
+        _manager->registerAction(action);
+        _manager->registerDetector(std::make_shared<PatternDetector>());
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/HOW_TO_DECRYPT.txt";
+
+        AnalysisContext context;
+        context.localRootPath = "/home/alice/Nextcloud";
+
+        QVERIFY(_manager->analyzeItem(item, context));
+
+        QCOMPARE(action->received.size(), 1);
+        QCOMPARE(action->received.first().level, ThreatLevel::Critical);
+        QCOMPARE(action->received.first().detectorName, QStringLiteral("PatternDetector"));
+        QCOMPARE(action->received.first().affectedFiles,
+                 QStringList{QStringLiteral("/home/alice/Nextcloud/Documents/HOW_TO_DECRYPT.txt")});
+    }
+
+    void testManagerDisabledActionIsSkipped()
+    {
+        struct RecordingAction : public SyncAction {
+            QString name() const override { return QStringLiteral("RecordingAction"); }
+            void execute(const ThreatInfo &threat) override { received.append(threat); }
+            QVector<ThreatInfo> received;
+        };
+
+        auto action = std::make_shared<RecordingAction>();
+        action->setEnabled(false);
+        _manager->registerAction(action);
+
+        _manager->trigger("manual");
+
+        QVERIFY(_manager->isTriggered());
+        QVERIFY(action->received.isEmpty());
+    }
+
+    void testManagerConfigurationPropagatesToDetectors()
+    {
+        auto massDelete = std::make_shared<MassDeleteDetector>();
+        auto canary = std::make_shared<CanaryDetector>();
+        auto backup = std::make_shared<BackupAction>();
+        _manager->registerDetector(massDelete);
+        _manager->registerDetector(canary);
+        _manager->registerAction(backup);
+
+        QCOMPARE(massDelete->threshold(), 10);
+        _manager->setDeleteThreshold(4, 30);
+        QCOMPARE(massDelete->threshold(), 4);
+        QCOMPARE(_manager->deleteThreshold(), 4);
+        QCOMPARE(_manager->windowSeconds(), 30);
+
+        QVERIFY(!canary->isCanaryFile("Finance/trap.xlsx"));
+        _manager->addCanaryFile("trap.xlsx");
+        QVERIFY(canary->isCanaryFile("Finance/trap.xlsx"));
+        QCOMPARE(_manager->canaryFiles(), QStringList{QStringLiteral("trap.xlsx")});
+        _manager->removeCanaryFile("trap.xlsx");
+        QVERIFY(!canary->isCanaryFile("Finance/trap.xlsx"));
+
+        QVERIFY(backup->isEnabled());
+        _manager->setAutoBackup(false);
+        QVERIFY(!backup->isEnabled());
+    }
+
+    void testAnalysisContextLocalPath()
+    {
+        AnalysisContext empty;
+        QCOMPARE(empty.localPath("Docs/a.txt"), QStringLiteral("Docs/a.txt"));
+
+        AnalysisContext withSlash;
+        withSlash.localRootPath = "/home/alice/Nextcloud/";
+        QCOMPARE(withSlash.localPath("Docs/a.txt"), QStringLiteral("/home/alice/Nextcloud/Docs/a.txt"));
+
+        AnalysisContext withoutSlash;
+        withoutSlash.localRootPath = "/home/alice/Nextcloud";
+        QCOMPARE(withoutSlash.localPath("Docs/a.txt"), QStringLiteral("/home/alice/Nextcloud/Docs/a.txt"));
     }
 
     void testRegisterDetector()
@@ -300,6 +416,22 @@ private slots:
         QVERIFY(result.description.contains("MODIFIED"));
     }
 
+    void testCanaryDetectorTriggerOnRename()
+    {
+        CanaryDetector detector;
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_RENAME;
+        item._file = "_canary.txt";
+        item._renameTarget = "_canary.txt.locked";
+
+        QVector<KillSwitchManager::Event> events;
+        ThreatInfo result = detector.analyze(item, events);
+
+        QCOMPARE(result.level, ThreatLevel::Critical);
+        QVERIFY(result.description.contains("RENAMED"));
+    }
+
     void testCanaryDetectorIgnoresNewCanary()
     {
         CanaryDetector detector;
@@ -427,6 +559,170 @@ private slots:
         QCOMPARE(unknownRange.second, 8.0);
     }
 
+    void testEntropyDetectorPasswordDatabasesWhitelisted()
+    {
+        // Encrypted-by-design formats must never count as ransomware output
+        EntropyDetector detector;
+        QVERIFY(detector.isNormallyHighEntropy("Passwords.kdbx"));
+        QVERIFY(detector.isNormallyHighEntropy("secret.gpg"));
+        QVERIFY(detector.isNormallyHighEntropy("site.p12"));
+        QVERIFY(detector.isNormallyHighEntropy("app.jar"));
+        QVERIFY(detector.isNormallyHighEntropy("disk.iso"));
+        QVERIFY(detector.isNormallyHighEntropy("photo.heic"));
+        QVERIFY(detector.isNormallyHighEntropy("book.epub"));
+    }
+
+    void testEntropyDetectorResolvesRelativePathWithContext()
+    {
+        // SyncFileItem::_file is relative to the sync folder. Without the
+        // folder root the detector cannot even open the file.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeRandomFile(dir.filePath("random.xyz"), 65536);
+
+        EntropyDetector detector;
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._type = ItemTypeFile;
+        item._file = "random.xyz";
+
+        QVector<KillSwitchManager::Event> events;
+
+        // No context: file not found, nothing to say
+        ThreatInfo blind = detector.analyze(item, events);
+        QCOMPARE(blind.level, ThreatLevel::None);
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+        ThreatInfo result = detector.analyze(item, events, context);
+
+        QVERIFY(result.level != ThreatLevel::None);
+        QCOMPARE(result.affectedFiles, QStringList{dir.filePath("random.xyz")});
+    }
+
+    void testEntropyDetectorSingleUnknownTypeFileIsMedium()
+    {
+        // One random-looking file of unknown type is not an attack.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeRandomFile(dir.filePath("export.dat"), 65536);
+
+        EntropyDetector detector;
+        detector.setThreshold(3);
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._type = ItemTypeFile;
+        item._file = "export.dat";
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+        ThreatInfo result = detector.analyze(item, {}, context);
+
+        QCOMPARE(result.level, ThreatLevel::Medium);
+    }
+
+    void testEntropyDetectorBurstOfHighEntropyFilesEscalates()
+    {
+        // ...but a burst of them within the window is exactly what an
+        // encryptor produces: High at the threshold, Critical at twice that.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+
+        EntropyDetector detector;
+        detector.setThreshold(3);
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+
+        QVector<ThreatLevel> levels;
+        for (int i = 0; i < 6; i++) {
+            const QString name = QString("file%1.dat").arg(i);
+            writeRandomFile(dir.filePath(name), 65536);
+
+            SyncFileItem item;
+            item._instruction = CSYNC_INSTRUCTION_NEW;
+            item._type = ItemTypeFile;
+            item._file = name;
+
+            levels.append(detector.analyze(item, {}, context).level);
+        }
+
+        QCOMPARE(levels[0], ThreatLevel::Medium);
+        QCOMPARE(levels[1], ThreatLevel::Medium);
+        QCOMPARE(levels[2], ThreatLevel::High);
+        QCOMPARE(levels[5], ThreatLevel::Critical);
+    }
+
+    void testEntropyDetectorRandomTextFileIsHighOnItsOwn()
+    {
+        // A .txt cannot legitimately look like random data
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeRandomFile(dir.filePath("notes.txt"), 65536);
+
+        EntropyDetector detector;
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_SYNC;
+        item._type = ItemTypeFile;
+        item._file = "notes.txt";
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+        ThreatInfo result = detector.analyze(item, {}, context);
+
+        QCOMPARE(result.level, ThreatLevel::High);
+    }
+
+    void testEntropyDetectorSkipsDownloads()
+    {
+        // For a download the local file is absent or still the old version
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeRandomFile(dir.filePath("notes.txt"), 65536);
+
+        EntropyDetector detector;
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_SYNC;
+        item._direction = SyncFileItem::Down;
+        item._type = ItemTypeFile;
+        item._file = "notes.txt";
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+        ThreatInfo result = detector.analyze(item, {}, context);
+
+        QCOMPARE(result.level, ThreatLevel::None);
+    }
+
+    void testEntropyDetectorNormalTextIsClean()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile file(dir.filePath("notes.txt"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        for (int i = 0; i < 500; i++) {
+            file.write("The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet.\n");
+        }
+        file.close();
+
+        EntropyDetector detector;
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._type = ItemTypeFile;
+        item._file = "notes.txt";
+
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+        ThreatInfo result = detector.analyze(item, {}, context);
+
+        QCOMPARE(result.level, ThreatLevel::None);
+    }
+
     // ==================== PatternDetector Tests ====================
 
     void testPatternDetectorCreation()
@@ -467,19 +763,28 @@ private slots:
         PatternDetector detector;
 
         // Common ransom note names
-        QVERIFY(detector.isRansomNote("README.txt"));
-        QVERIFY(detector.isRansomNote("readme.txt"));
         QVERIFY(detector.isRansomNote("HOW_TO_DECRYPT.txt"));
         QVERIFY(detector.isRansomNote("How-to-restore.txt"));
         QVERIFY(detector.isRansomNote("DECRYPT_INSTRUCTIONS.txt"));
-        QVERIFY(detector.isRansomNote("_readme_.txt"));
+        QVERIFY(detector.isRansomNote("_readme_.txt"));            // STOP/Djvu
         QVERIFY(detector.isRansomNote("!README!.txt"));
-        QVERIFY(detector.isRansomNote("RESTORE-MY-FILES.txt"));
+        QVERIFY(detector.isRansomNote("RESTORE-MY-FILES.txt"));    // LockBit
+        QVERIFY(detector.isRansomNote("README_FOR_DECRYPT.txt"));
+        QVERIFY(detector.isRansomNote("readme-to-restore-files.txt"));
+        QVERIFY(detector.isRansomNote("YOUR_FILES_ARE_ENCRYPTED.txt"));
+        QVERIFY(detector.isRansomNote("WARNING_READ_ME.txt"));
 
-        // Normal files - should NOT match
+        // Normal files - should NOT match. A plain README.txt is in nearly
+        // every project folder: flagging it Critical would pause the sync
+        // of every developer on day one.
+        QVERIFY(!detector.isRansomNote("README.txt"));
+        QVERIFY(!detector.isRansomNote("readme.txt"));
+        QVERIFY(!detector.isRansomNote("README.md"));
+        QVERIFY(!detector.isRansomNote("warning.txt"));
+        QVERIFY(!detector.isRansomNote("your_files.txt"));
         QVERIFY(!detector.isRansomNote("document.txt"));
         QVERIFY(!detector.isRansomNote("notes.txt"));
-        QVERIFY(!detector.isRansomNote("project_notes.txt"));  // Not starting with "readme"
+        QVERIFY(!detector.isRansomNote("project_notes.txt"));
         QVERIFY(!detector.isRansomNote("config.txt"));
     }
 
@@ -622,8 +927,46 @@ private slots:
         QVERIFY(detector.hasRansomwareExtension("file.WANNACRY"));
 
         // Ransom notes should be case-insensitive
-        QVERIFY(detector.isRansomNote("README.TXT"));
+        QVERIFY(detector.isRansomNote("README_FOR_DECRYPT.TXT"));
         QVERIFY(detector.isRansomNote("How_To_Decrypt.TXT"));
+    }
+
+    void testPatternDetectorRenameToRansomwareExtension()
+    {
+        // Ransomware often renames in place: report.docx -> report.docx.locked.
+        // The discovery reports that as a RENAME whose target carries the pattern.
+        PatternDetector detector;
+        detector.setThreshold(5);
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_RENAME;
+        item._file = "Documents/report.docx";
+        item._renameTarget = "Documents/report.docx.locked";
+
+        QVector<KillSwitchManager::Event> events;
+        ThreatInfo result = detector.analyze(item, events);
+
+        QCOMPARE(result.level, ThreatLevel::High);
+        QVERIFY(result.affectedFiles.first().endsWith("report.docx.locked"));
+    }
+
+    void testPatternDetectorCountsRenameEvents()
+    {
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        QVector<KillSwitchManager::Event> events;
+        events.append({QDateTime::currentDateTime(), "RENAME", "a.jpg.locked"});
+        events.append({QDateTime::currentDateTime(), "RENAME", "b.jpg.locked"});
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "c.locked";
+
+        ThreatInfo result = detector.analyze(item, events);
+
+        // 2 renamed + 1 new = threshold reached
+        QCOMPARE(result.level, ThreatLevel::High);
     }
 
     void testPatternDetectorFullIntegration()
@@ -1134,6 +1477,75 @@ private slots:
 
         // Should trigger because 6 non-whitelisted files >= threshold of 5
         QVERIFY(result.level >= ThreatLevel::High);
+    }
+
+    void testMassDelete_SmallBurstIsNotHighRate()
+    {
+        // All items of a sync run reach the detector within milliseconds.
+        // Three deletions 1 ms apart must not be read as "3000 files/s".
+        MassDeleteDetector detector;
+        detector.setThreshold(10);
+
+        QDateTime now = QDateTime::currentDateTime();
+        QVector<KillSwitchManager::Event> events;
+        for (int i = 0; i < 3; i++) {
+            events.append({now.addMSecs(i), "DELETE", QString("photo%1.jpg").arg(i)});
+        }
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_REMOVE;
+        item._file = "photo3.jpg";
+
+        ThreatInfo result = detector.analyze(item, events);
+        QVERIFY2(result.level < ThreatLevel::High,
+                 qPrintable(QStringLiteral("Unexpected level %1: %2")
+                                .arg(static_cast<int>(result.level))
+                                .arg(result.description)));
+    }
+
+    void testMassDelete_SustainedRateIsHigh()
+    {
+        // 7 deletions spread over 1.2 s (~5.8 files/s) is a sustained burst,
+        // even though the count (7) stays below the threshold (10).
+        MassDeleteDetector detector;
+        detector.setThreshold(10);
+        detector.setRateLimit(5.0);
+
+        QDateTime start = QDateTime::currentDateTime().addMSecs(-1200);
+        QVector<KillSwitchManager::Event> events;
+        for (int i = 0; i < 7; i++) {
+            events.append({start.addMSecs(i * 200), "DELETE", QString("file%1.txt").arg(i)});
+        }
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_REMOVE;
+        item._file = "file7.txt";
+
+        ThreatInfo result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::High);
+        QVERIFY(result.description.contains("rate"));
+    }
+
+    void testMassDelete_AffectedFilesUseLocalPaths()
+    {
+        MassDeleteDetector detector;
+        detector.setThreshold(2);
+
+        QVector<KillSwitchManager::Event> events;
+        events.append({QDateTime::currentDateTime(), "DELETE", "Docs/a.txt"});
+        events.append({QDateTime::currentDateTime(), "DELETE", "Docs/b.txt"});
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_REMOVE;
+        item._file = "Docs/c.txt";
+
+        AnalysisContext context;
+        context.localRootPath = "/sync/root/";
+
+        ThreatInfo result = detector.analyze(item, events, context);
+        QVERIFY(result.level >= ThreatLevel::High);
+        QVERIFY(result.affectedFiles.contains("/sync/root/Docs/a.txt"));
+        QVERIFY(result.affectedFiles.contains("/sync/root/Docs/b.txt"));
     }
 
     void testMassDelete_TreeDeletionDetection()

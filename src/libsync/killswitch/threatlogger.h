@@ -102,6 +102,11 @@ private:
 
     static ThreatLogger *s_instance;
     QString m_logFilePath;
+
+    // The whole file is rewritten on every entry. Keep it bounded: an
+    // encryptor touching thousands of files would otherwise turn each log
+    // call into a multi-megabyte rewrite.
+    static constexpr int MAX_LOG_ENTRIES = 2000;
 };
 
 } // namespace OCC
