@@ -239,6 +239,8 @@ cd build && ctest -R "KillSwitch|FormatSignature" --output-on-failure
 - `FormatSignatureDetectorTest` (38): synthetic PNG/ZIP/PDF/JPEG/MP3/text files, chunked and tail-only corruption, decoys
 - `KillSwitchScenariosTest` (26): full attack simulations and benign workloads against a sandbox of realistic files
 
+On Windows, [GUIDE-TEST-WINDOWS.md](GUIDE-TEST-WINDOWS.md) walks through the whole loop (update, build, test, run, simulate) with `admin\win\scripts\test-sentinel.ps1`.
+
 ### Try an attack on the real client
 
 `test/scripts/simulate-ransomware.py` (Python 3, no dependencies) only ever touches a folder named `sentinel-sandbox` and keeps a backup of what it seeded in your temp directory:
