@@ -36,9 +36,30 @@ private:
     static QByteArray randomBytes(int size)
     {
         QByteArray data(size, Qt::Uninitialized);
-        for (int i = 0; i < size; i++) {
+        const int words = size / 4;
+        if (words > 0) {
+            QRandomGenerator::global()->fillRange(reinterpret_cast<quint32 *>(data.data()), words);
+        }
+        for (int i = words * 4; i < size; i++) {
             data[i] = static_cast<char>(QRandomGenerator::global()->bounded(256));
         }
+        return data;
+    }
+
+    /// Copy of data with [offset, offset + length) replaced by random bytes (an in-place chunk encryptor).
+    /// Documented blind spot kept out of the tests: ciphertext whose first few hundred bytes contain
+    /// FF D9 passes the JPEG check as a trailer (about 0.5 % of damaged JPEGs), so the first 2 KB of
+    /// the ciphertext never contain that pair.
+    static QByteArray withRandomRange(QByteArray data, int offset, int length)
+    {
+        length = qMin(length, data.size() - offset);
+        QByteArray noise = randomBytes(length);
+        for (int i = 0; i + 1 < qMin(noise.size(), 2048); i++) {
+            if (static_cast<quint8>(noise.at(i)) == 0xFF && static_cast<quint8>(noise.at(i + 1)) == 0xD9) {
+                noise[i + 1] = '\xD8';
+            }
+        }
+        data.replace(offset, length, noise);
         return data;
     }
 
@@ -155,6 +176,221 @@ private:
             text += "The quick brown fox jumps over the lazy dog. Zeile ";
             text += QByteArray::number(i);
             text += " \xC3\xA4\xC3\xB6\xC3\xBC \xE2\x82\xAC\n";
+        }
+        return text;
+    }
+
+    // ---------- large-file builders (realistic multi-structure files, >= 3 MB) ----------
+
+    static constexpr int KB = 1024;
+    static constexpr int MB = 1024 * KB;
+
+    /// Entropy-coded JPEG data: random bytes with byte stuffing (FF 00) and a restart marker every 8 KB
+    static QByteArray jpegScanData(int size)
+    {
+        QByteArray scan = randomBytes(size);
+        for (int i = 0; i < scan.size(); i++) {
+            if (static_cast<quint8>(scan.at(i)) == 0xFF) {
+                if (i + 1 < scan.size()) {
+                    scan[i + 1] = '\0';
+                }
+                i++;
+            }
+        }
+        for (int i = 8 * KB; i + 1 < scan.size(); i += 8 * KB) {
+            scan[i] = '\xFF';
+            scan[i + 1] = static_cast<char>(0xD0 + (i / (8 * KB)) % 8);
+        }
+        if (!scan.isEmpty() && static_cast<quint8>(scan.at(scan.size() - 1)) == 0xFF) {
+            scan[scan.size() - 1] = '\x7F';
+        }
+        return scan;
+    }
+
+    static QByteArray jpegAppSegment(int payloadSize)
+    {
+        QByteArray segment = QByteArray::fromHex("FFE2");
+        const int length = payloadSize + 2;
+        segment.append(static_cast<char>(length >> 8));
+        segment.append(static_cast<char>(length));
+        return segment + randomBytes(payloadSize);
+    }
+
+    static QByteArray jpegHeaderSegments()
+    {
+        QByteArray jpeg = QByteArray::fromHex("FFD8");
+        jpeg += QByteArray::fromHex("FFE0" "0010" "4A46494600" "0101" "00" "0001" "0001" "0000");
+        return jpeg;
+    }
+
+    static QByteArray jpegTablesAndScans(const QByteArray &scan, int scans = 1)
+    {
+        QByteArray jpeg;
+        jpeg += QByteArray::fromHex("FFDB" "0043" "00") + QByteArray(64, '\x10');
+        jpeg += QByteArray::fromHex("FFC0" "000B" "08" "0001" "0001" "01" "01" "11" "00");
+        const int perScan = scan.size() / scans;
+        for (int i = 0; i < scans; i++) {
+            if (i > 0) {
+                // A Huffman table between scans (progressive JPEG)
+                jpeg += QByteArray::fromHex("FFC4" "0023" "00") + QByteArray(16, '\x01') + QByteArray(16, '\x05');
+            }
+            jpeg += QByteArray::fromHex("FFDA" "0008" "01" "01" "00" "00" "3F" "00");
+            jpeg += scan.mid(i * perScan, (i == scans - 1) ? -1 : perScan);
+        }
+        jpeg += QByteArray::fromHex("FFD9");
+        return jpeg;
+    }
+
+    static QByteArray largeJpeg(int scanBytes, const QByteArray &extraSegments = QByteArray(), int scans = 1)
+    {
+        return jpegHeaderSegments() + extraSegments + jpegTablesAndScans(jpegScanData(scanBytes), scans);
+    }
+
+    /// PNG with IDAT chunks of chunkSize bytes (libpng writes 8 KB chunks)
+    static QByteArray largePng(int idatBytes, int chunkSize = 8 * KB)
+    {
+        QByteArray ihdr = u32be(4096) + u32be(4096);
+        ihdr.append('\x08');
+        ihdr.append('\x02');
+        ihdr.append('\0');
+        ihdr.append('\0');
+        ihdr.append('\0');
+        QByteArray png = QByteArray::fromHex("89504E470D0A1A0A") + pngChunk("IHDR", ihdr);
+        for (int done = 0; done < idatBytes; done += chunkSize) {
+            png += pngChunk("IDAT", randomBytes(qMin(chunkSize, idatBytes - done)));
+        }
+        return png + pngChunk("IEND", QByteArray());
+    }
+
+    struct ZipEntry {
+        QByteArray name;
+        QByteArray content;
+    };
+
+    static QByteArray zipLocalHeader(const ZipEntry &entry)
+    {
+        QByteArray local = QByteArray::fromHex("504B0304");
+        local += u16le(20) + u16le(0) + u16le(0) + u16le(0) + u16le(0);
+        local += u32le(FormatSignatureDetector::crc32(entry.content));
+        local += u32le(static_cast<quint32>(entry.content.size()));
+        local += u32le(static_cast<quint32>(entry.content.size()));
+        local += u16le(static_cast<quint16>(entry.name.size())) + u16le(0);
+        return local + entry.name;
+    }
+
+    static QByteArray zipCentralHeader(const ZipEntry &entry, quint32 localOffset)
+    {
+        QByteArray central = QByteArray::fromHex("504B0102");
+        central += u16le(20) + u16le(20) + u16le(0) + u16le(0) + u16le(0) + u16le(0);
+        central += u32le(FormatSignatureDetector::crc32(entry.content));
+        central += u32le(static_cast<quint32>(entry.content.size()));
+        central += u32le(static_cast<quint32>(entry.content.size()));
+        central += u16le(static_cast<quint16>(entry.name.size())) + u16le(0) + u16le(0);
+        central += u16le(0) + u16le(0) + u32le(0);
+        central += u32le(localOffset);
+        return central + entry.name;
+    }
+
+    static QByteArray zipEocdRecord(int entries, quint32 cdSize, quint32 cdOffset)
+    {
+        QByteArray eocd = QByteArray::fromHex("504B0506");
+        eocd += u16le(0) + u16le(0);
+        eocd += u16le(static_cast<quint16>(entries)) + u16le(static_cast<quint16>(entries));
+        eocd += u32le(cdSize) + u32le(cdOffset) + u16le(0);
+        return eocd;
+    }
+
+    /// A proper archive: local headers + data, central directory, EOCD
+    static QByteArray zipArchive(const QVector<ZipEntry> &entries)
+    {
+        QByteArray data;
+        QByteArray central;
+        for (const ZipEntry &entry : entries) {
+            central += zipCentralHeader(entry, static_cast<quint32>(data.size()));
+            data += zipLocalHeader(entry) + entry.content;
+        }
+        return data + central + zipEocdRecord(entries.size(), static_cast<quint32>(central.size()), static_cast<quint32>(data.size()));
+    }
+
+    static QVector<ZipEntry> officeEntries(int mediaEntries, int mediaSize)
+    {
+        QVector<ZipEntry> entries;
+        entries.append({"[Content_Types].xml", plainText()});
+        entries.append({"word/document.xml", randomBytes(60 * KB)});
+        for (int i = 1; i <= mediaEntries; i++) {
+            entries.append({"word/media/image" + QByteArray::number(i) + ".jpeg", randomBytes(mediaSize)});
+        }
+        return entries;
+    }
+
+    /// PDF with a classic cross-reference table and one stream object per element of streams
+    static QByteArray pdfWithStreams(const QVector<QByteArray> &streams)
+    {
+        QByteArray pdf("%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+        QVector<int> offsets;
+        auto addObject = [&pdf, &offsets](const QByteArray &body) {
+            offsets.append(pdf.size());
+            pdf += QByteArray::number(offsets.size()) + " 0 obj\n" + body + "\nendobj\n";
+        };
+        addObject("<< /Type /Catalog /Pages 2 0 R >>");
+        QByteArray kids;
+        for (int i = 0; i < streams.size(); i++) {
+            kids += QByteArray::number(3 + i) + " 0 R ";
+        }
+        addObject("<< /Type /Pages /Kids [" + kids + "] /Count " + QByteArray::number(streams.size()) + " >>");
+        for (const QByteArray &stream : streams) {
+            addObject("<< /Length " + QByteArray::number(stream.size()) + " /Filter /FlateDecode >>\nstream\n"
+                      + stream + "\nendstream");
+        }
+        const int xrefOffset = pdf.size();
+        pdf += "xref\n0 " + QByteArray::number(offsets.size() + 1) + "\n0000000000 65535 f \n";
+        for (int offset : offsets) {
+            pdf += QByteArray::number(offset).rightJustified(10, '0') + " 00000 n \n";
+        }
+        pdf += "trailer\n<< /Size " + QByteArray::number(offsets.size() + 1) + " /Root 1 0 R >>\nstartxref\n"
+            + QByteArray::number(xrefOffset) + "\n%%EOF\n";
+        return pdf;
+    }
+
+    static QByteArray mp4Atom(const QByteArray &type, const QByteArray &payload)
+    {
+        return u32be(static_cast<quint32>(8 + payload.size())) + type + payload;
+    }
+
+    /// Phone-style recording: ftyp, mdat, moov at the end
+    static QByteArray mp4WithTrailingMoov(int mdatSize)
+    {
+        const QByteArray ftyp = mp4Atom("ftyp", "isom" + u32be(512) + "isomiso2avc1mp41");
+        return ftyp + mp4Atom("mdat", randomBytes(mdatSize)) + mp4Atom("moov", mp4Atom("mvhd", QByteArray(100, '\x01')) + mp4Atom("trak", randomBytes(6 * KB)));
+    }
+
+    /// Streaming-style recording: ftyp, moov, then moof + mdat fragments
+    static QByteArray mp4Fragmented(int fragments, int fragmentSize)
+    {
+        QByteArray file = mp4Atom("ftyp", "iso5" + u32be(512) + "iso5dash") + mp4Atom("moov", mp4Atom("mvhd", QByteArray(100, '\x01')));
+        for (int i = 0; i < fragments; i++) {
+            file += mp4Atom("moof", mp4Atom("mfhd", u32be(0) + u32be(static_cast<quint32>(i + 1))));
+            file += mp4Atom("mdat", randomBytes(fragmentSize));
+        }
+        return file;
+    }
+
+    /// MPEG1 layer III 128 kbit/s 44.1 kHz frames (417 bytes) behind a small ID3v2 tag
+    static QByteArray largeMp3(int frames)
+    {
+        QByteArray mp3 = QByteArray("ID3") + QByteArray::fromHex("0300" "00" "00000A00") + QByteArray(1280, '\0');
+        for (int i = 0; i < frames; i++) {
+            mp3 += QByteArray::fromHex("FFFB9000") + randomBytes(413);
+        }
+        return mp3;
+    }
+
+    static QByteArray largeText(int approxSize)
+    {
+        QByteArray text;
+        const QByteArray paragraph = plainText();
+        while (text.size() < approxSize) {
+            text += paragraph;
         }
         return text;
     }
@@ -449,6 +685,201 @@ private slots:
         EXPECT_VERDICT(check("noext", randomBytes(5000)), Unknown);
     }
 
+    // ==================== Body checks on large files ====================
+
+    void testLargeValidFilesMatch()
+    {
+        struct Sample {
+            const char *name;
+            QByteArray data;
+        };
+        const Sample samples[] = {
+            {"photo.jpg", largeJpeg(3 * MB + 300 * KB)},
+            {"progressive.jpg", largeJpeg(3 * MB + 100 * KB, QByteArray(), 4)},
+            {"poster.png", largePng(3 * MB + 200 * KB)},
+            {"report.docx", zipArchive(officeEntries(50, 64 * KB))},
+            {"scan.pdf", pdfWithStreams(QVector<QByteArray>(52, randomBytes(64 * KB)))},
+            {"holiday.mp4", mp4WithTrailingMoov(3 * MB + 100 * KB)},
+            {"stream.mp4", mp4Fragmented(14, 256 * KB)},
+            {"podcast.mp3", largeMp3(8000)},
+            {"log.txt", largeText(3 * MB + 50 * KB)},
+        };
+        for (const Sample &sample : samples) {
+            QVERIFY2(sample.data.size() >= 3 * MB, sample.name);
+            const auto result = check(QString::fromLatin1(sample.name), sample.data);
+            QVERIFY2(result.verdict == Verdict::Match, qPrintable(QString::fromLatin1(sample.name) + ": " + result.reason));
+            QVERIFY(!result.bodyCorrupted);
+            QVERIFY(!result.tailCorrupted);
+        }
+    }
+
+    void testMiddleChunkEncryptionIsBodyCorrupted()
+    {
+        // Play/RansomHub/Conti style: a 1 MiB chunk that spares header and tail
+        struct Sample {
+            const char *name;
+            QByteArray data;
+            const char *expectedReason;
+        };
+        QVector<QByteArray> pdfStreams;
+        for (int i = 0; i < 52; i++) {
+            pdfStreams.append(randomBytes(64 * KB));
+        }
+        const Sample samples[] = {
+            {"photo.jpg", largeJpeg(3 * MB + 300 * KB), "JPEG marker grammar"},
+            {"report.docx", zipArchive(officeEntries(50, 64 * KB)), "ZIP local header"},
+            {"scan.pdf", pdfWithStreams(pdfStreams), "PDF object"},
+            {"stream.mp4", mp4Fragmented(14, 256 * KB), "MP4 atom chain"},
+            {"podcast.mp3", largeMp3(8000), "MP3 frame sync"},
+            {"log.txt", largeText(3 * MB + 50 * KB), "NUL bytes and random data"},
+        };
+        for (const Sample &sample : samples) {
+            const QString name = QString::fromLatin1(sample.name);
+            const auto result = check(name, withRandomRange(sample.data, MB, MB));
+            QVERIFY2(result.verdict == Verdict::Mismatch, qPrintable(name + ": " + result.reason));
+            QVERIFY2(result.bodyCorrupted, qPrintable(name + ": " + result.reason));
+            QVERIFY(!result.tailCorrupted);
+            QVERIFY2(result.reason.contains(QLatin1String(sample.expectedReason)), qPrintable(name + ": " + result.reason));
+            QVERIFY(result.reason.startsWith("corrupted body"));
+        }
+    }
+
+    void testMiddleChunkInsidePngIsInvisible()
+    {
+        // Documented limit: a PNG has no structure a sampled window can verify
+        // (IDAT chunks are only reachable by walking the chain from the start),
+        // so only the first 64 KB and the IEND trailer are checked.
+        const auto result = check("poster.png", withRandomRange(largePng(3 * MB + 200 * KB), MB, MB));
+        EXPECT_VERDICT(result, Match);
+        // ... but a chunk within the first 64 KB breaks the verified chain
+        const auto front = check("front.png", withRandomRange(largePng(3 * MB + 200 * KB), 16 * KB, 16 * KB));
+        EXPECT_VERDICT(front, Mismatch);
+        QVERIFY(front.bodyCorrupted);
+        QVERIFY(front.reason.contains("PNG chunk"));
+    }
+
+    void testMiddleChunkInsideSingleMdatOrStreamIsInvisible()
+    {
+        // Documented limits: compressed payloads carry no structure. A phone
+        // video (one big mdat) and a PDF made of one huge image stream are
+        // only caught when the chunk hits a header, the trailer or the xref.
+        EXPECT_VERDICT(check("holiday.mp4", withRandomRange(mp4WithTrailingMoov(3 * MB + 100 * KB), MB, MB)), Match);
+        EXPECT_VERDICT(check("image.pdf", withRandomRange(pdfWithStreams({randomBytes(3 * MB + 100 * KB)}), MB, MB)), Match);
+    }
+
+    void testTailOnlyEncryptionIsBodyCorrupted()
+    {
+        // Formats without a trailer structure: the last window must still obey the format
+        struct Sample {
+            const char *name;
+            QByteArray data;
+            int tailLength;
+            const char *expectedReason;
+        };
+        const Sample samples[] = {
+            {"photo.jpg", largeJpeg(3 * MB + 300 * KB), MB, "JPEG marker grammar"},
+            {"small.jpg", largeJpeg(200 * KB), 96 * KB, "JPEG marker grammar"},
+            {"holiday.mp4", mp4WithTrailingMoov(3 * MB + 100 * KB), MB, "MP4 atom chain"},
+            {"clip.mp4", mp4WithTrailingMoov(150 * KB), 96 * KB, "MP4 atom chain"},
+            {"podcast.mp3", largeMp3(8000), MB, "MP3 tail"},
+            {"notes.txt", largeText(40 * KB), 16 * KB, "NUL bytes and random data"},
+            {"expenses.csv", largeText(3 * MB), MB, "NUL bytes and random data"},
+        };
+        for (const Sample &sample : samples) {
+            const QString name = QString::fromLatin1(sample.name);
+            const auto result = check(name, withRandomRange(sample.data, sample.data.size() - sample.tailLength, sample.tailLength));
+            QVERIFY2(result.verdict == Verdict::Mismatch, qPrintable(name + ": " + result.reason));
+            QVERIFY2(result.bodyCorrupted, qPrintable(name + ": " + result.reason));
+            QVERIFY2(result.reason.contains(QLatin1String(sample.expectedReason)), qPrintable(name + ": " + result.reason));
+        }
+    }
+
+    void testPdfFullOfImagesIsNotFlagged()
+    {
+        // Streams legitimately look random: a 2 MB image stream, and a scan
+        // with one image per page, must never count as damage.
+        EXPECT_VERDICT(check("image.pdf", pdfWithStreams({randomBytes(2 * MB)})), Match);
+        QVector<QByteArray> pages;
+        for (int i = 0; i < 12; i++) {
+            pages.append(randomBytes(300 * KB));
+        }
+        EXPECT_VERDICT(check("scans.pdf", pdfWithStreams(pages)), Match);
+        // A table shifted by CRLF conversion breaks every later offset: not encryption
+        QByteArray shifted = pdfWithStreams(QVector<QByteArray>(40, randomBytes(80 * KB)));
+        shifted.replace("\nendobj\n", "\r\nendobj\r\n");
+        EXPECT_VERDICT(check("crlf.pdf", shifted), Match);
+    }
+
+    void testJpegMotionPhotoTrailerMatches()
+    {
+        // Samsung/Google motion photos append an MP4 (here: 1 MB of junk) after FFD9
+        EXPECT_VERDICT(check("motion.jpg", largeJpeg(3 * MB) + randomBytes(MB)), Match);
+        EXPECT_VERDICT(check("motion-video.jpg", largeJpeg(2 * MB + 123 * KB) + mp4WithTrailingMoov(MB + 77 * KB)), Match);
+        // Trailer starting mid-window, or a small image with a big trailer
+        EXPECT_VERDICT(check("motion-mid.jpg", largeJpeg(MB + 512 * KB + 1500) + randomBytes(2 * MB)), Match);
+        EXPECT_VERDICT(check("motion-small.jpg", largeJpeg(100 * KB) + randomBytes(3 * MB)), Match);
+    }
+
+    void testJpegWithLargeAppSegmentsMatches()
+    {
+        // 600 KB of APP2 segments (ICC profile / MPF) before the first scan:
+        // the scan start lies far beyond the 4 KB head
+        QByteArray segments;
+        for (int i = 0; i < 10; i++) {
+            segments += jpegAppSegment(60 * KB);
+        }
+        const auto result = check("icc.jpg", largeJpeg(3 * MB, segments));
+        EXPECT_VERDICT(result, Match);
+        // ... and damage behind them is still found
+        const auto damaged = check("icc-damaged.jpg", withRandomRange(largeJpeg(3 * MB, segments), MB, MB));
+        EXPECT_VERDICT(damaged, Mismatch);
+        QVERIFY(damaged.bodyCorrupted);
+    }
+
+    void testZipWithStaleCentralDirectoryMatches()
+    {
+        // Append-only update: the old central directory stays as dead bytes in
+        // the middle, a new one listing every entry is written at the end.
+        QVector<ZipEntry> entries = officeEntries(30, 64 * KB);
+        const QByteArray first = zipArchive(entries);
+        const ZipEntry extra{"word/media/image99.jpeg", randomBytes(MB)};
+        QByteArray central;
+        quint32 offset = 0;
+        for (const ZipEntry &entry : entries) {
+            central += zipCentralHeader(entry, offset);
+            offset += static_cast<quint32>(zipLocalHeader(entry).size() + entry.content.size());
+        }
+        QByteArray updated = first; // old central directory + EOCD remain in place
+        central += zipCentralHeader(extra, static_cast<quint32>(updated.size()));
+        updated += zipLocalHeader(extra) + extra.content;
+        const quint32 cdOffset = static_cast<quint32>(updated.size());
+        updated += central + zipEocdRecord(entries.size() + 1, static_cast<quint32>(central.size()), cdOffset);
+
+        const auto result = check("updated.docx", updated);
+        EXPECT_VERDICT(result, Match);
+        QVERIFY(!result.bodyCorrupted);
+    }
+
+    void testLargeDocxTruncatedTailIsTailCorrupted()
+    {
+        // Written in place with the last 64 KB missing: EOCD absent, as before
+        QByteArray docx = zipArchive(officeEntries(50, 64 * KB));
+        docx.chop(64 * KB);
+        const auto result = check("truncated.docx", docx);
+        EXPECT_VERDICT(result, Mismatch);
+        QVERIFY(result.tailCorrupted);
+        QVERIFY(!result.bodyCorrupted);
+        QVERIFY(result.reason.contains("truncated/corrupted tail"));
+    }
+
+    void testBodyCheckSkipsSmallFiles()
+    {
+        // Below 16 KB the head already covers a quarter of the file; the
+        // random "scan data" of these minimal images is left alone
+        EXPECT_VERDICT(check("tiny.jpg", minimalJpeg(12000)), Match);
+        EXPECT_VERDICT(check("tiny.mp4", QByteArray::fromHex("00000018") + "ftypisom" + randomBytes(12000)), Match);
+    }
+
     // ==================== analyze() ====================
 
     void testAnalyzeValidFilesAreNone()
@@ -584,6 +1015,27 @@ private slots:
         QCOMPARE(levels[0], ThreatLevel::Medium);
         QCOMPARE(levels[1], ThreatLevel::Medium);
         QCOMPARE(levels[2], ThreatLevel::High);
+    }
+
+    void testAnalyzeBodyCorruptionEscalatesWithCount()
+    {
+        // A genuine JPEG head is itself high-entropy, so a damaged body must
+        // not be mistaken for a random header: single hit Medium, High at the
+        // threshold, Critical at twice the threshold.
+        FormatSignatureDetector detector;
+        detector.setThreshold(2);
+        QVector<KillSwitchManager::Event> events;
+
+        const ThreatLevel expected[] = {ThreatLevel::Medium, ThreatLevel::High, ThreatLevel::High, ThreatLevel::Critical};
+        for (int i = 0; i < 4; i++) {
+            const QString name = QStringLiteral("tail%1.jpg").arg(i);
+            const QByteArray jpeg = largeJpeg(200 * KB);
+            write(name, withRandomRange(jpeg, jpeg.size() - 96 * KB, 96 * KB));
+            const ThreatInfo info = detector.analyze(makeItem(name, CSYNC_INSTRUCTION_SYNC), events, context());
+            QVERIFY2(info.level == expected[i], qPrintable(name + ": " + info.description));
+            QVERIFY(info.description.contains("corrupted body"));
+            QVERIFY(info.description.contains("JPEG image"));
+        }
     }
 
     void testAnalyzeTinyFileIsNone()

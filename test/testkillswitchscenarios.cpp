@@ -99,42 +99,99 @@ QByteArray u32le(quint32 v)
     return u16le(static_cast<quint16>(v)) + u16le(static_cast<quint16>(v >> 16));
 }
 
-// Office documents are ZIP containers: one stored entry with (deflated-looking) random payload + EOCD
-QByteArray officeDocument(int payloadSize)
+struct ZipEntry {
+    QByteArray name;
+    QByteArray content;
+};
+
+QByteArray zipLocalHeader(const ZipEntry &entry)
 {
-    const QByteArray content = randomBytes(payloadSize);
-    const QByteArray name("word/document.xml");
     QByteArray local = QByteArray::fromHex("504B0304");
-    local += u16le(20);                                      // version needed
-    local += u16le(0);                                       // flags
-    local += u16le(0);                                       // stored
-    local += u16le(0) + u16le(0);                            // time, date
-    local += u32le(FormatSignatureDetector::crc32(content)); // crc
-    local += u32le(static_cast<quint32>(content.size()));
-    local += u32le(static_cast<quint32>(content.size()));
-    local += u16le(static_cast<quint16>(name.size()));
-    local += u16le(0);
-    local += name;
-    local += content;
-    QByteArray eocd = QByteArray::fromHex("504B0506");
-    eocd += QByteArray(16, '\0');
-    eocd += u16le(0);
-    return local + eocd;
+    local += u16le(20) + u16le(0) + u16le(0) + u16le(0) + u16le(0);     // version, flags, stored, time, date
+    local += u32le(FormatSignatureDetector::crc32(entry.content));
+    local += u32le(static_cast<quint32>(entry.content.size()));
+    local += u32le(static_cast<quint32>(entry.content.size()));
+    local += u16le(static_cast<quint16>(entry.name.size())) + u16le(0);
+    return local + entry.name;
 }
 
+QByteArray zipCentralHeader(const ZipEntry &entry, quint32 localOffset)
+{
+    QByteArray central = QByteArray::fromHex("504B0102");
+    central += u16le(20) + u16le(20) + u16le(0) + u16le(0) + u16le(0) + u16le(0);
+    central += u32le(FormatSignatureDetector::crc32(entry.content));
+    central += u32le(static_cast<quint32>(entry.content.size()));
+    central += u32le(static_cast<quint32>(entry.content.size()));
+    central += u16le(static_cast<quint16>(entry.name.size())) + u16le(0) + u16le(0);
+    central += u16le(0) + u16le(0) + u32le(0);
+    central += u32le(localOffset);
+    return central + entry.name;
+}
+
+/// A proper ZIP archive: local headers + data, central directory, EOCD
+QByteArray zipArchive(const QVector<ZipEntry> &entries)
+{
+    QByteArray data;
+    QByteArray central;
+    for (const ZipEntry &entry : entries) {
+        central += zipCentralHeader(entry, static_cast<quint32>(data.size()));
+        data += zipLocalHeader(entry) + entry.content;
+    }
+    QByteArray eocd = QByteArray::fromHex("504B0506");
+    eocd += u16le(0) + u16le(0);
+    eocd += u16le(static_cast<quint16>(entries.size())) + u16le(static_cast<quint16>(entries.size()));
+    eocd += u32le(static_cast<quint32>(central.size())) + u32le(static_cast<quint32>(data.size())) + u16le(0);
+    return data + central + eocd;
+}
+
+// Office documents are ZIP containers: the XML parts plus (deflated-looking)
+// random media entries of at most 128 KB each, like the images of a real file
+QByteArray officeDocument(int payloadSize)
+{
+    QVector<ZipEntry> entries;
+    entries.append({"[Content_Types].xml", QByteArray("<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types/>")});
+    const int documentSize = qMin(payloadSize, 32 * KB);
+    entries.append({"word/document.xml", randomBytes(documentSize)});
+    int remaining = payloadSize - documentSize;
+    for (int image = 1; remaining > 0; ++image) {
+        const int size = qMin(remaining, 128 * KB);
+        entries.append({"word/media/image" + QByteArray::number(image) + ".jpeg", randomBytes(size)});
+        remaining -= size;
+    }
+    return zipArchive(entries);
+}
+
+// A PDF with a classic cross-reference table: the content is split into
+// stream objects of at most 128 KB (one image per page, like a scan)
 QByteArray pdfDocument(int streamSize)
 {
-    QByteArray pdf("%PDF-1.7\n%\xE2\xE3\xCF\xD3\n"
-                   "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"
-                   "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n"
-                   "3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
-    pdf += "4 0 obj\n<< /Length " + QByteArray::number(streamSize) + " /Filter /FlateDecode >>\nstream\n";
-    pdf += randomBytes(streamSize);
-    pdf += "\nendstream\nendobj\n"
-           "xref\n0 5\n0000000000 65535 f \n"
-           "trailer\n<< /Size 5 /Root 1 0 R >>\n"
-           "startxref\n9\n"
-           "%%EOF\n";
+    QByteArray pdf("%PDF-1.7\n%\xE2\xE3\xCF\xD3\n");
+    QVector<int> offsets;
+    auto addObject = [&pdf, &offsets](const QByteArray &body) {
+        offsets.append(pdf.size());
+        pdf += QByteArray::number(offsets.size()) + " 0 obj\n" + body + "\nendobj\n";
+    };
+    const int pages = qMax(1, (streamSize + 128 * KB - 1) / (128 * KB));
+    addObject("<< /Type /Catalog /Pages 2 0 R >>");
+    QByteArray kids;
+    for (int i = 0; i < pages; ++i) {
+        kids += QByteArray::number(3 + i) + " 0 R ";
+    }
+    addObject("<< /Type /Pages /Kids [" + kids + "] /Count " + QByteArray::number(pages) + " >>");
+    int remaining = streamSize;
+    for (int i = 0; i < pages; ++i) {
+        const int size = qMin(remaining, 128 * KB);
+        remaining -= size;
+        addObject("<< /Type /Page /Parent 2 0 R /Length " + QByteArray::number(size) + " /Filter /FlateDecode >>\nstream\n"
+                  + randomBytes(size) + "\nendstream");
+    }
+    const int xrefOffset = pdf.size();
+    pdf += "xref\n0 " + QByteArray::number(offsets.size() + 1) + "\n0000000000 65535 f \n";
+    for (int offset : offsets) {
+        pdf += QByteArray::number(offset).rightJustified(10, '0') + " 00000 n \n";
+    }
+    pdf += "trailer\n<< /Size " + QByteArray::number(offsets.size() + 1) + " /Root 1 0 R >>\n"
+           "startxref\n" + QByteArray::number(xrefOffset) + "\n%%EOF\n";
     return pdf;
 }
 
@@ -158,6 +215,29 @@ QByteArray pngImage(int idatSize)
         + pngChunk("IEND", QByteArray());
 }
 
+// Entropy-coded data as a real encoder writes it: every FF is stuffed with a
+// 00 and a restart marker follows every 8 KB
+QByteArray jpegScanData(int size)
+{
+    QByteArray scan = randomBytes(size);
+    for (int i = 0; i < scan.size(); ++i) {
+        if (static_cast<quint8>(scan.at(i)) == 0xFF) {
+            if (i + 1 < scan.size()) {
+                scan[i + 1] = '\0';
+            }
+            ++i;
+        }
+    }
+    for (int i = 8 * KB; i + 1 < scan.size(); i += 8 * KB) {
+        scan[i] = '\xFF';
+        scan[i + 1] = static_cast<char>(0xD0 + (i / (8 * KB)) % 8);
+    }
+    if (!scan.isEmpty() && static_cast<quint8>(scan.at(scan.size() - 1)) == 0xFF) {
+        scan[scan.size() - 1] = '\x7F';
+    }
+    return scan;
+}
+
 QByteArray jpegImage(int scanBytes)
 {
     QByteArray jpeg = QByteArray::fromHex("FFD8");
@@ -169,16 +249,43 @@ QByteArray jpegImage(int scanBytes)
     jpeg += QByteArray::fromHex("FFC0" "000B" "08" "0001" "0001" "01" "01" "11" "00");
     // SOS, length 8
     jpeg += QByteArray::fromHex("FFDA" "0008" "01" "01" "00" "00" "3F" "00");
-    jpeg += randomBytes(scanBytes);
+    jpeg += jpegScanData(scanBytes);
     jpeg += QByteArray::fromHex("FFD9");
     return jpeg;
 }
 
+QByteArray mp4Atom(const QByteArray &type, const QByteArray &payload)
+{
+    return u32be(static_cast<quint32>(8 + payload.size())) + type + payload;
+}
+
+// Phone-style recording: ftyp, one big mdat, moov written last
 QByteArray mp4Video(int mdatSize)
 {
-    QByteArray ftyp = u32be(32) + "ftyp" + "isom" + u32be(512) + "isomiso2avc1mp41";
-    QByteArray mdat = u32be(static_cast<quint32>(8 + mdatSize)) + "mdat" + randomBytes(mdatSize);
-    return ftyp + mdat;
+    const QByteArray ftyp = mp4Atom("ftyp", "isom" + u32be(512) + "isomiso2avc1mp41");
+    const QByteArray moov = mp4Atom("moov", mp4Atom("mvhd", QByteArray(100, '\x01')) + mp4Atom("trak", randomBytes(6 * KB)));
+    return ftyp + mp4Atom("mdat", randomBytes(mdatSize)) + moov;
+}
+
+// Streaming/meeting-style recording: ftyp, moov, then moof + mdat fragments of 256 KB
+QByteArray fragmentedMp4Video(int approxSize)
+{
+    QByteArray file = mp4Atom("ftyp", "iso5" + u32be(512) + "iso5dash") + mp4Atom("moov", mp4Atom("mvhd", QByteArray(100, '\x01')));
+    for (int fragment = 1; file.size() < approxSize; ++fragment) {
+        file += mp4Atom("moof", mp4Atom("mfhd", u32be(0) + u32be(static_cast<quint32>(fragment))));
+        file += mp4Atom("mdat", randomBytes(256 * KB));
+    }
+    return file;
+}
+
+// MPEG1 layer III 128 kbit/s 44.1 kHz frames (417 bytes) behind a small ID3v2 tag
+QByteArray mp3Audio(int approxSize)
+{
+    QByteArray mp3 = QByteArray("ID3") + QByteArray::fromHex("0300" "00" "00000A00") + QByteArray(1280, '\0');
+    while (mp3.size() < approxSize) {
+        mp3 += QByteArray::fromHex("FFFB9000") + randomBytes(413);
+    }
+    return mp3;
 }
 
 QByteArray keepassDatabase(int size)
@@ -280,6 +387,7 @@ public:
         if (!_dir.isValid()) {
             return;
         }
+        // Folders in the order the discovery lists them (alphabetical)
         // Documents
         write(QStringLiteral("Documents/report-q1.docx"), officeDocument(sizeBetween(40 * KB, 200 * KB)));
         write(QStringLiteral("Documents/report-q2.docx"), officeDocument(sizeBetween(40 * KB, 200 * KB)));
@@ -295,14 +403,6 @@ public:
         write(QStringLiteral("Finance/ledger.xlsx"), officeDocument(sizeBetween(100 * KB, 300 * KB)));
         write(QStringLiteral("Finance/expenses.csv"), csvDocument(sizeBetween(20 * KB, 60 * KB)));
         write(QStringLiteral("Finance/accounts.csv"), csvDocument(sizeBetween(20 * KB, 60 * KB)));
-        // Photos
-        for (int i = 1; i <= 6; ++i) {
-            write(QStringLiteral("Photos/IMG_%1.jpg").arg(i, 4, 10, QLatin1Char('0')),
-                  jpegImage(sizeBetween(80 * KB, 300 * KB)));
-        }
-        write(QStringLiteral("Photos/diagram.png"), pngImage(sizeBetween(40 * KB, 200 * KB)));
-        write(QStringLiteral("Photos/logo.png"), pngImage(sizeBetween(20 * KB, 60 * KB)));
-        write(QStringLiteral("Photos/screenshot.png"), pngImage(sizeBetween(100 * KB, 300 * KB)));
         // Media
         write(QStringLiteral("Media/holiday.mp4"), mp4Video(sizeBetween(200 * KB, 300 * KB)));
         write(QStringLiteral("Media/demo.mp4"), mp4Video(sizeBetween(100 * KB, 300 * KB)));
@@ -312,13 +412,27 @@ public:
         write(QStringLiteral("Notes/ideas.md"), textDocument(sizeBetween(20 * KB, 40 * KB), QStringLiteral("Ideas")));
         write(QStringLiteral("Notes/README.md"), textDocument(sizeBetween(20 * KB, 30 * KB), QStringLiteral("Readme")));
         write(QStringLiteral("Notes/changelog.txt"), textDocument(sizeBetween(20 * KB, 40 * KB), QStringLiteral("Changelog")));
+        // Photos
+        for (int i = 1; i <= 6; ++i) {
+            write(QStringLiteral("Photos/IMG_%1.jpg").arg(i, 4, 10, QLatin1Char('0')),
+                  jpegImage(sizeBetween(80 * KB, 300 * KB)));
+        }
+        write(QStringLiteral("Photos/diagram.png"), pngImage(sizeBetween(40 * KB, 200 * KB)));
+        write(QStringLiteral("Photos/logo.png"), pngImage(sizeBetween(20 * KB, 60 * KB)));
+        write(QStringLiteral("Photos/screenshot.png"), pngImage(sizeBetween(100 * KB, 300 * KB)));
         // Password manager
         write(QStringLiteral("Vault/passwords.kdbx"), keepassDatabase(sizeBetween(20 * KB, 80 * KB)));
         // Canary placed by the client
         write(QStringLiteral("_canary.txt"), textDocument(2 * KB, QStringLiteral("Canary - do not modify")));
-        // Larger files for the chunked-encryption scenarios (3-4 MB)
+        // Larger files for the chunked-encryption scenarios (3-4 MB). The
+        // first three carry structure all over the file (ZIP local headers,
+        // PDF objects, MP4 fragment headers); the phone video and the PNG
+        // are one compressed blob with a header and a trailer.
         write(QStringLiteral("Large/archive.docx"), officeDocument(sizeBetween(3 * MB, 4 * MB)));
         write(QStringLiteral("Large/scan.pdf"), pdfDocument(sizeBetween(3 * MB, 4 * MB)));
+        write(QStringLiteral("Large/recording.mp4"), fragmentedMp4Video(sizeBetween(3 * MB, 4 * MB) + 8 * KB));
+        write(QStringLiteral("Large/photo.jpg"), jpegImage(sizeBetween(3 * MB, 4 * MB)));
+        write(QStringLiteral("Large/podcast.mp3"), mp3Audio(sizeBetween(3 * MB, 4 * MB)));
         write(QStringLiteral("Large/video.mp4"), mp4Video(sizeBetween(3 * MB, 4 * MB)));
         write(QStringLiteral("Large/poster.png"), pngImage(sizeBetween(3 * MB, 4 * MB)));
     }
@@ -733,26 +847,47 @@ private slots:
         QVERIFY2(index == 0, qPrintable(QStringLiteral("expected trigger on the 1st file, got %1").arg(index + 1)));
     }
 
-    // 4b. Info only: alternating chunks that spare both the header and the tail
-    //     (e.g. a chunk scheme that starts at 1 MB and stops before the end).
-    void probeAlternatingChunksHeaderAndTailIntact()
+    // 4b. Play/RansomHub/Conti style chunk that spares both the header and the
+    //     tail: encrypt [1 MB, 2 MB) only. The FormatSignatureDetector's body
+    //     walk sees the missing ZIP local headers, PDF objects and MP4 fragment
+    //     headers, the JPEG marker grammar and the MP3 frame chain; a single
+    //     mdat or IDAT blob (phone video, PNG) is a documented blind spot.
+    void attackAlternatingChunksHeaderAndTailIntact()
     {
         Sandbox box;
         QVERIFY(box.isValid());
         Harness harness(box.root());
 
         const QStringList victims = box.largeFiles();
+        QVERIFY(victims.size() >= 7);
         for (const QString &victim : victims) {
             const qint64 size = box.size(victim);
             // encrypt [1 MB, 2 MB) only; header and the last >1 MB stay intact
             QVERIFY(size > 3 * MB);
             QVERIFY(box.encryptRange(victim, MB, MB));
         }
-        const QVector<SyncFileItem> items = modifiedItems(victims);
 
+        // Per-file view before the engine runs: which formats see the chunk
+        FormatSignatureDetector detector;
+        QStringList seen;
+        for (const QString &victim : victims) {
+            const auto result = detector.checkFile(box.absolute(victim), victim);
+            if (result.verdict == FormatSignatureDetector::Verdict::Mismatch) {
+                QVERIFY2(result.bodyCorrupted, qPrintable(victim + ": " + result.reason));
+                seen.append(QFileInfo(victim).suffix());
+            }
+        }
+        qInfo().noquote() << "[4b] chunk at 1 MB seen in:" << seen.join(QLatin1Char(' '));
+        for (const char *suffix : {"docx", "pdf", "mp3"}) {
+            QVERIFY2(seen.contains(QLatin1String(suffix)), suffix);
+        }
+        QVERIFY2(seen.count(QStringLiteral("mp4")) >= 1, "fragmented mp4 not seen");
+
+        const QVector<SyncFileItem> items = modifiedItems(victims);
         const int index = harness.feed(items);
-        recordAttack(QStringLiteral("4b (probe) 1 MB chunk at offset 1 MB, header+tail intact"), index, items.size(), 1, harness);
-        // Not asserted: documents a known limitation of header/tail checks.
+        recordAttack(QStringLiteral("4b 1 MB chunk at offset 1 MB, header+tail intact (SYNC)"), index, items.size(), 1, harness);
+        QVERIFY2(index >= 0, "Chunk encryption sparing header and tail was not detected");
+        QVERIFY2(index <= 2, qPrintable(QStringLiteral("expected trigger by the 3rd file, got %1").arg(index + 1)));
     }
 
     // 5. Tail-only: header intact, tail random, across docx/xlsx/pdf/png. The last
@@ -787,8 +922,10 @@ private slots:
         QVERIFY2(index <= 2, qPrintable(QStringLiteral("expected trigger by the 3rd file, got %1").arg(index + 1)));
     }
 
-    // 5b. Info only: tail-only on formats without a tail structure (jpg, mp4, txt, csv)
-    void probeTailOnlyOnFormatsWithoutTrailer()
+    // 5b. Tail-only on formats without a trailer structure (jpg, mp4, txt, csv):
+    //     the last 4 KB window must still obey the format (JPEG marker grammar,
+    //     the MP4 atom chain reaching the trailing moov, text without NUL bytes).
+    void attackTailOnlyOnFormatsWithoutTrailer()
     {
         Sandbox box;
         QVERIFY(box.isValid());
@@ -807,11 +944,28 @@ private slots:
             const qint64 length = qMin<qint64>(96 * KB, size - 8 * KB);
             QVERIFY(box.encryptRange(victim, size - length, length));
         }
-        const QVector<SyncFileItem> items = modifiedItems(victims);
 
+        // Every format is covered per file; ciphertext that happens to start
+        // with an FFD9 passes a JPEG as a motion photo (~0.5 %), so one miss
+        // in the batch is tolerated.
+        FormatSignatureDetector detector;
+        int missed = 0;
+        for (const QString &victim : victims) {
+            const auto result = detector.checkFile(box.absolute(victim), victim);
+            if (result.verdict != FormatSignatureDetector::Verdict::Mismatch) {
+                qInfo().noquote() << "[5b] not seen:" << victim << result.reason;
+                ++missed;
+            } else {
+                QVERIFY2(result.bodyCorrupted, qPrintable(victim + ": " + result.reason));
+            }
+        }
+        QVERIFY2(missed <= 1, qPrintable(QStringLiteral("%1 of %2 tail-damaged files not seen").arg(missed).arg(victims.size())));
+
+        const QVector<SyncFileItem> items = modifiedItems(victims);
         const int index = harness.feed(items);
-        recordAttack(QStringLiteral("5b (probe) tail-only on jpg/mp4/txt/csv, header intact"), index, items.size(), 1, harness);
-        // Not asserted: documents what the detectors can see without a tail structure.
+        recordAttack(QStringLiteral("5b tail-only on jpg/mp4/txt/csv, header intact (SYNC)"), index, items.size(), 1, harness);
+        QVERIFY2(index >= 0, "Tail-only encryption of jpg/mp4/txt/csv was not detected");
+        QVERIFY2(index <= 2, qPrintable(QStringLiteral("expected trigger by the 3rd file, got %1").arg(index + 1)));
     }
 
     // 6. Encrypt to a new file with a fixed known extension and delete the original
