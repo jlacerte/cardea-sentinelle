@@ -6,21 +6,36 @@ name: Linux Sentinel CI
 on:
   push:
     branches:
-      - master
-      - 'sentinel-*'
+      - '**'
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
-      - 'test/CMakeLists.txt'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/linux-sentinel-ci.yml'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
-      - 'test/CMakeLists.txt'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/linux-sentinel-ci.yml'
   workflow_dispatch:
     inputs:
@@ -107,7 +122,7 @@ jobs:
           retention-days: 7
 
   build-clang:
-    name: Build & Test (Clang)
+    name: Build & Test (Clang, NextcloudDev identity)
     if: ${{ github.event.inputs.compiler != 'gcc' }}
     runs-on: ubuntu-latest
     container: ghcr.io/nextcloud/continuous-integration-client-qt6:client-trixie-6.8.2-2
@@ -123,12 +138,15 @@ jobs:
         run: |
           mkdir -p build-clang
           cd build-clang
+          # The clang job builds the NextcloudDev identity (nextclouddev, own
+          # config folder) used for test installs, so both identities stay green.
           cmake .. -G Ninja \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_BUILD_TYPE=Debug \
             -DQT_MAJOR_VERSION=6 \
             -DQUICK_COMPILER=ON \
+            -DNEXTCLOUD_DEV=ON \
             -DBUILD_UPDATER=ON \
             -DBUILD_TESTING=ON \
             -DCMAKE_CXX_FLAGS="-Werror -Wall -Wextra"

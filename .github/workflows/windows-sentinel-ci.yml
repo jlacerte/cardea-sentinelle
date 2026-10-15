@@ -6,19 +6,36 @@ name: Windows Sentinel CI
 on:
   push:
     branches:
-      - master
-      - 'sentinel-*'
+      - '**'
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/windows-sentinel-ci.yml'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/windows-sentinel-ci.yml'
   workflow_dispatch:
     inputs:
@@ -170,9 +187,9 @@ jobs:
           Write-Host "Kill Switch tests passed successfully!"
 
       # NOTE: Upstream Nextcloud tests are run for visibility only.
-        # They have known flaky tests unrelated to Kill Switch.
-        # Only Kill Switch tests are required to pass.
-        - name: Run all tests (informational)
+      # They have known flaky tests unrelated to Kill Switch.
+      # Only Kill Switch tests are required to pass.
+      - name: Run all tests (informational)
         continue-on-error: true
         if: ${{ github.event.inputs.run_all_tests == 'true' || github.event_name == 'push' }}
         shell: pwsh
