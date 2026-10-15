@@ -282,15 +282,21 @@ function Step-InstallDependencies {
 function Step-Verify {
     Write-Header "Verifying the prefix $Script:Prefix"
 
+    # What the build's find_package() calls require (REQUIRED ones only).
+    # KF6GuiAddons is optional in src/gui/CMakeLists.txt and the nextcloud-client
+    # blueprint does not pull it, so it is reported but never fails the check.
+    # Craft's SQLite ships as bin\libsqlite.dll + lib\sqlite3.lib.
     $required = @(
         "lib\cmake\Qt6\Qt6Config.cmake",
         "bin\Qt6Core.dll",
         "share\ECM\cmake\ECMConfig.cmake",
         "lib\cmake\KF6Archive\KF6ArchiveConfig.cmake",
-        "lib\cmake\KF6GuiAddons\KF6GuiAddonsConfig.cmake",
         "lib\cmake\Qt6Keychain\Qt6KeychainConfig.cmake",
         "lib\cmake\OpenSSL\OpenSSLConfig.cmake",
-        "bin\sqlite3.dll"
+        "lib\sqlite3.lib"
+    )
+    $optional = @(
+        "lib\cmake\KF6GuiAddons\KF6GuiAddonsConfig.cmake"
     )
     $missing = @()
     foreach ($rel in $required) {
@@ -309,8 +315,20 @@ function Step-Verify {
             }
         }
     }
+    foreach ($rel in $optional) {
+        if (Test-Path (Join-Path $Script:Prefix $rel)) { Write-Step "ok   $rel (optional)" }
+        else { Write-Info "--   $rel (optional, not needed by the build)" }
+    }
     if ($missing.Count -gt 0) {
         throw "The prefix is incomplete ($($missing.Count) missing). Re-run without -Verify to install, or run: craft --install-deps nextcloud-client"
+    }
+
+    # Not a Craft package, but CMake refuses to configure without it (icon generation).
+    $inkscape = Get-Command inkscape -ErrorAction SilentlyContinue
+    if (-not $inkscape -and -not (Test-Path "C:\Program Files\Inkscape\bin\inkscape.exe")) {
+        Write-Warn "Inkscape not found. The build needs it to generate icons: winget install --id Inkscape.Inkscape -e"
+    } else {
+        Write-Step "ok   Inkscape (icon generation)"
     }
 
     $qtVersion = ""

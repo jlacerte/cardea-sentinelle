@@ -252,6 +252,20 @@ function Test-Prerequisites {
         $allGood = $false
     }
 
+    # Check Inkscape: cmake/modules/GenerateIconsUtils.cmake needs an SVG
+    # converter (inkscape or rsvg-convert) and fails the configure step without it.
+    $inkscapeDir = "C:\Program Files\Inkscape\bin"
+    if (Test-Command "inkscape" -or Test-Command "rsvg-convert") {
+        Write-Step "SVG converter found (Inkscape / rsvg-convert)"
+    } elseif (Test-Path "$inkscapeDir\inkscape.exe") {
+        Write-Step "Inkscape found at $inkscapeDir (added to PATH for this build)"
+        $env:PATH = "$inkscapeDir;$env:PATH"
+    } else {
+        Write-Error "Inkscape not found (needed to generate the application icons)"
+        Write-Host "  Install: winget install --id Inkscape.Inkscape -e   (then open a new PowerShell)"
+        $allGood = $false
+    }
+
     # Check for ECM/KF6 (via Craft or vcpkg)
     $ecmFound = $false
 

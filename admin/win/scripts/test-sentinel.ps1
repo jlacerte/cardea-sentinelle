@@ -258,6 +258,9 @@ function Step-Prerequisites {
         if (-not (Find-CraftPrefix)) {
             Write-Warn "No KDE Craft prefix found (expected $Script:CraftRoot\$Script:CraftTarget). Run .\install-craft.ps1 first unless you build against a standalone Qt."
         }
+        if ($Build -and -not (Test-CommandAvailable "inkscape") -and -not (Test-Path "C:\Program Files\Inkscape\bin\inkscape.exe")) {
+            throw "Inkscape not found; CMake needs it to generate the icons. Install it with: winget install --id Inkscape.Inkscape -e (then open a new PowerShell)"
+        }
     }
 
     if ($Simulate) {
@@ -358,12 +361,47 @@ function Step-Test {
     $summary = $output | Where-Object { $_ -match "tests passed" } | Select-Object -Last 1
     if ($summary) { Write-Step $summary.Trim() }
 
-    if ($code -ne 0) {
-        $failed = $output | Where-Object { $_ -match "\*\*\*Failed|Failed\s+\d" }
-        throw "ctest returned $code. Failed tests:`n    $($failed -join "`n    ")`n    Full log: $Script:LogFile"
-    }
     if (-not $summary -or $summary -match "No tests were found") {
         throw "No test matched '$TestFilter'. Was the build configured with -DBUILD_TESTING=ON (compile-sentinel.ps1 does that)?"
+    }
+
+    # On Windows the QtTest executables have been seen to print nothing on
+    # the console (issue #24), which leaves --output-on-failure empty. Run each
+    # suite once more with "-o <file>,txt": the file always carries the
+    # per-test results and the Totals line, and is printed here.
+    Write-Step "Collecting per-suite results"
+    $suiteRegex = $TestFilter
+    $exes = Get-ChildItem -Path (Join-Path $Script:BuildDir "bin") -Filter "*Test.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.BaseName -match $suiteRegex }
+    $suiteFailures = @()
+    foreach ($exe in $exes) {
+        $report = Join-Path $Script:LogDir ("{0}-{1}.txt" -f $exe.BaseName, (Get-Date -Format "yyyyMMdd-HHmmss"))
+        $savedPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        Push-Location $exe.DirectoryName
+        try {
+            & $exe.FullName -o "$report,txt" 2>&1 | Out-Null
+            $suiteCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedPreference
+            Pop-Location
+        }
+        $totals = ""
+        if (Test-Path $report) {
+            $totals = (Select-String -Path $report -Pattern "^Totals:" | Select-Object -Last 1).Line
+            Select-String -Path $report -Pattern "^FAIL!|^   Loc:|^   Actual|^   Expected" | ForEach-Object { Write-Host "    $($_.Line)" -ForegroundColor Red }
+        }
+        if ($suiteCode -ne 0 -or -not $totals -or $totals -notmatch ", 0 failed") {
+            Write-Fail ("{0}: {1} (exit {2}) - {3}" -f $exe.BaseName, $totals, $suiteCode, $report)
+            $suiteFailures += $exe.BaseName
+        } else {
+            Write-Step ("{0}: {1}" -f $exe.BaseName, $totals)
+        }
+    }
+
+    if ($code -ne 0 -or $suiteFailures.Count -gt 0) {
+        $failed = $output | Where-Object { $_ -match "\*\*\*Failed|Failed\s+\d" }
+        throw "Tests failed (ctest exit $code; failing suites: $($suiteFailures -join ', ')).`n    $($failed -join "`n    ")`n    Reports: $Script:LogDir`n    Full log: $Script:LogFile"
     }
 }
 

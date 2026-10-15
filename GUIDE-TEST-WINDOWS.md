@@ -44,6 +44,7 @@ données à chaque fois, pour comprendre ce qui se passe ou dépanner.
 | Git | `winget install Git.Git` | `git --version` |
 | CMake | `winget install Kitware.CMake` | `cmake --version` (≥ 3.16) |
 | Ninja | `winget install Ninja-build.Ninja` | `ninja --version` |
+| Inkscape (génération des icônes, exigé par CMake) | `winget install --id Inkscape.Inkscape -e` (demande une élévation) | `inkscape --version`, ou `C:\Program Files\Inkscape\bin\inkscape.exe` existe |
 | Python 3 | `winget install Python.Python.3.12` | `py -3 --version` |
 | Visual Studio 2022 Build Tools (C++) | voir `SENTINEL-BUILD-PLAN.md`, étape 2.1 | `cl` dans un « Developer PowerShell for VS 2022 » |
 | KDE Craft : **Qt 6**, ECM, KF6 Archive/GuiAddons, QtKeychain, OpenSSL, SQLite, zlib | `admin\win\scripts\install-craft.ps1` | `admin\win\scripts\install-craft.ps1 -Verify` |
@@ -170,8 +171,11 @@ L'étape `Test` ajoute les DLL de Qt et de Craft au `PATH`, puis lance
 | `FormatSignatureDetectorTest` | 38 | signatures de formats, chiffrement par blocs, leurres |
 | `KillSwitchScenariosTest` | 26 | attaques complètes et usages normaux sur un bac à sable |
 
-Le script échoue si un test échoue et liste les tests en cause. Pour tout
-lancer d'un coup : `-All` (= `-Update -Build -Test`).
+Le script échoue si un test échoue et liste les tests en cause. Comme les
+exécutables QtTest peuvent ne rien afficher sur la console Windows, il relance
+aussi chaque suite avec `-o fichier,txt`, affiche la ligne `Totals:` de chacune
+et garde les rapports dans `logs\`. Pour tout lancer d'un coup : `-All`
+(= `-Update -Build -Test`).
 
 Équivalent manuel (depuis le dossier de build, avec `C:\Qt\6.8.x\msvc2022_64\bin`
 et `%USERPROFILE%\CraftRoot\bin` dans le `PATH`) :
@@ -314,6 +318,8 @@ les lignes en rouge, suffisent pour diagnostiquer à distance.
 | `has diverged from origin` | commits locaux absents du serveur | `git push`, ou `git reset --hard origin/<branche>` si vous les abandonnez |
 | `git fetch` échoue trois fois | réseau, proxy, branche supprimée | vérifier l'accès à github.com |
 | `No KDE Craft prefix and no Qt 6.8 found` | Craft pas installé, ou racine non standard | `install-craft.ps1`, ou `SENTINEL_CRAFT_ROOT` vers votre racine |
+| `Could not find SVG_CONVERTER` à la configuration CMake | Inkscape absent | `winget install --id Inkscape.Inkscape -e`, nouvelle fenêtre PowerShell |
+| ctest dit « Passed » mais la sortie des tests est vide | les exécutables QtTest n'écrivent pas sur la console Windows (cause en cours d'analyse) | `test-sentinel.ps1 -Test` relance chaque suite avec `-o fichier,txt` et affiche les totaux ; les rapports sont dans `logs\` |
 | `Visual Studio 2022 with C++ workload not found` | Build Tools absents ou sans C++ | réinstaller avec le workload « Desktop development with C++ » |
 | `The prefix is incomplete` (install-craft -Verify) | installation Craft interrompue | relancer `install-craft.ps1`, il reprend |
 | erreurs de liaison Qt, ou DLL incompatible au lancement | deux Qt mélangés (C:\Qt et Craft) | `-Clean`, ne garder que Craft, vérifier qu'aucun `C:\Qt\...\bin` n'est dans le `PATH` |
