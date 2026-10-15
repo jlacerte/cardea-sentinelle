@@ -12,7 +12,7 @@ param(
     [switch]$InstallQt,
     [switch]$InstallVS,
     [switch]$All,
-    [string]$CraftRoot = "$env:USERPROFILE\CraftRoot",
+    [string]$CraftRoot = "C:\CraftRoot",
     [string]$VcpkgRoot = "$env:USERPROFILE\vcpkg"
 )
 
@@ -145,7 +145,9 @@ function Install-VisualStudio {
 function Install-Qt {
     Write-Header "Qt Installation Instructions"
 
-    Write-Host "Qt 6.8+ is required but cannot be installed automatically via command line."
+    Write-Host "With KDE Craft (-UseCraft, recommended) Qt is installed by Craft and nothing"
+    Write-Host "else is needed. Install a standalone Qt ONLY if you do not use Craft; mixing"
+    Write-Host "a C:\Qt build with Craft libraries produces link errors and DLL mismatches."
     Write-Host ""
     Write-Host "Please follow these steps:"
     Write-Host ""
@@ -178,86 +180,24 @@ function Install-Qt {
 # ============================================================================
 
 function Install-KDECraft {
-    Write-Header "Installing KDE Craft"
+    Write-Header "Installing KDE Craft (Qt, ECM, KF6, QtKeychain, OpenSSL, SQLite, ...)"
 
-    if (Test-Path "$CraftRoot\craft\craftenv.ps1") {
-        Write-Step "KDE Craft already installed at: $CraftRoot"
-        return $true
-    }
-
-    Write-Step "Setting up KDE Craft at: $CraftRoot"
-
-    # Create Craft root directory
-    if (-not (Test-Path $CraftRoot)) {
-        New-Item -ItemType Directory -Path $CraftRoot | Out-Null
-    }
-
-    # Download Craft bootstrap
-    $bootstrapUrl = "https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1"
-    $bootstrapScript = Join-Path $env:TEMP "install_craft.ps1"
-
-    Write-Step "Downloading Craft bootstrap script..."
-    Invoke-WebRequest -Uri $bootstrapUrl -OutFile $bootstrapScript
-
-    # Run Craft bootstrap
-    Write-Step "Running Craft bootstrap..."
-    Push-Location $CraftRoot
-
-    try {
-        # Set up Craft with MSVC compiler
-        $env:CRAFT_ROOT = $CraftRoot
-        & $bootstrapScript --prefix $CraftRoot --compiler msvc2022
-
-        if ($LASTEXITCODE -ne 0) {
-            throw "Craft bootstrap failed"
-        }
-    }
-    finally {
-        Pop-Location
-    }
-
-    Write-Step "KDE Craft installation complete"
-
-    # Install required KDE packages
-    Install-KDEPackages
-
-    return $true
-}
-
-function Install-KDEPackages {
-    Write-Header "Installing KDE Frameworks via Craft"
-
-    $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
-
-    if (-not (Test-Path $craftEnv)) {
-        Write-Error "Craft environment not found"
+    # The real work lives in install-craft.ps1, which follows the CI recipe
+    # (CraftMaster + the repository's craftmaster.ini). Qt comes from Craft:
+    # no separate Qt installation is needed.
+    $installer = Join-Path $PSScriptRoot "install-craft.ps1"
+    if (-not (Test-Path $installer)) {
+        Write-Error "install-craft.ps1 not found next to this script"
         return $false
     }
 
-    # Source Craft environment
-    Write-Step "Loading Craft environment..."
-    & $craftEnv
-
-    $packages = @(
-        "kde/frameworks/extra-cmake-modules",
-        "kde/frameworks/tier1/karchive",
-        "kde/frameworks/tier1/ki18n",
-        "kde/frameworks/tier1/kguiaddons",
-        "kde/frameworks/tier1/kwidgetsaddons",
-        "kde/frameworks/tier1/kwindowsystem",
-        "kde/frameworks/tier1/kconfig",
-        "kde/frameworks/tier2/kdoctools",
-        "libs/openssl",
-        "libs/sqlite",
-        "libs/zlib"
-    )
-
-    foreach ($package in $packages) {
-        Write-Step "Installing: $package"
-        & craft $package
+    $cmdArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installer)
+    if ($PSBoundParameters.ContainsKey("CraftRoot")) { $cmdArgs += @("-CraftRoot", $CraftRoot) }
+    & powershell.exe @cmdArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "install-craft.ps1 failed (exit code $LASTEXITCODE); see logs\install-craft-*.log"
+        return $false
     }
-
-    Write-Step "KDE Frameworks installation complete"
     return $true
 }
 
@@ -317,7 +257,7 @@ Write-Header "Nextcloud Sentinel - Dependency Installer"
 if ($All) {
     $InstallVS = $true
     $UseCraft = $true
-    $InstallQt = $true
+    # Qt comes from Craft; the standalone Qt instructions are only for -InstallQt without Craft.
 }
 
 # Always install basic tools
@@ -343,16 +283,16 @@ Write-Header "Installation Complete"
 
 Write-Host "Next steps:"
 Write-Host ""
-Write-Host "1. Ensure Qt 6.8+ is installed and Qt6_DIR is set"
-Write-Host "2. Open a new terminal to pick up environment changes"
-Write-Host "3. Run the build script:"
+Write-Host "1. Open a new 'Developer PowerShell for VS 2022' to pick up environment changes"
+Write-Host "2. Build the test variant:"
 Write-Host ""
 Write-Host "   cd $PSScriptRoot" -ForegroundColor Green
-Write-Host "   .\build-sentinel.ps1 -Configure -Build" -ForegroundColor Green
+Write-Host "   .\compile-sentinel.ps1 -Dev -Configure -Build" -ForegroundColor Green
+Write-Host "   (or .\test-sentinel.ps1 -All for update + build + tests)" -ForegroundColor Green
 Write-Host ""
 
 if ($UseCraft) {
-    Write-Host "KDE Craft was installed. To use Craft environment:"
-    Write-Host "   . $CraftRoot\craft\craftenv.ps1" -ForegroundColor Green
+    Write-Host "KDE Craft prefix: $CraftRoot\windows-msvc2022_64-cl (Qt, ECM, KF6, OpenSSL, ...)"
+    Write-Host "If you used a non-default root, set the user environment variable SENTINEL_CRAFT_ROOT=$CraftRoot"
     Write-Host ""
 }

@@ -46,8 +46,24 @@ données à chaque fois, pour comprendre ce qui se passe ou dépanner.
 | Ninja | `winget install Ninja-build.Ninja` | `ninja --version` |
 | Python 3 | `winget install Python.Python.3.12` | `py -3 --version` |
 | Visual Studio 2022 Build Tools (C++) | voir `SENTINEL-BUILD-PLAN.md`, étape 2.1 | `cl` dans un « Developer PowerShell for VS 2022 » |
-| Qt 6.8 MSVC 2022 64-bit | Qt Online Installer, installer dans `C:\Qt` | le dossier `C:\Qt\6.8.x\msvc2022_64` existe |
-| KDE Craft (ECM, KF6, OpenSSL, SQLite) | `admin\win\scripts\install-dependencies.ps1 -UseCraft` | `%USERPROFILE%\CraftRoot\craft\craftenv.ps1` existe |
+| KDE Craft : **Qt 6**, ECM, KF6 Archive/GuiAddons, QtKeychain, OpenSSL, SQLite, zlib | `admin\win\scripts\install-craft.ps1` | `admin\win\scripts\install-craft.ps1 -Verify` |
+
+**Un seul Qt : celui de Craft.** N'installez pas Qt depuis l'installateur Qt
+en plus. Deux Qt différents (un dans `C:\Qt`, un dans Craft) donnent des erreurs
+de liaison ou un plantage immédiat de l'exécutable par incompatibilité de DLL.
+Les scripts de compilation et de test utilisent en priorité le préfixe Craft
+(`C:\CraftRoot\windows-msvc2022_64-cl`) et n'utilisent un Qt autonome que
+s'il n'y a aucun préfixe Craft.
+
+`install-craft.ps1` suit exactement la recette de la CI Windows (CraftMaster +
+`craftmaster.ini` du dépôt, cache binaire Nextcloud). Il vérifie les
+prérequis (VS 2022 C++, Python 3.9+ 64 bits, 30 Go libres, accès réseau), ne
+pose aucune question, reprend là où il s'est arrêté si vous le relancez, et
+termine par une vérification des fichiers CMake attendus. Comptez 20 à 60
+minutes. Racine par défaut : `C:\CraftRoot` (évitez les chemins avec espaces) ;
+pour une autre racine, passez `-CraftRoot D:\Craft` **et** définissez la
+variable d'environnement utilisateur `SENTINEL_CRAFT_ROOT=D:\Craft` pour que
+les autres scripts la trouvent.
 
 Après chaque installation, **ouvrez une nouvelle fenêtre PowerShell** pour que
 le `PATH` soit à jour. Le détail de chaque étape est dans
@@ -118,9 +134,9 @@ L'étape `Build` :
 - vérifie que `build-windows-Release-dev\bin\nextclouddev.exe` existe.
 
 Première compilation : 15 à 30 minutes. Les suivantes ne recompilent que ce qui
-a changé. `-Clean` efface le dossier de build avant (utile après un changement
-de version de Qt). `-BuildType Debug` compile en débogage. `-QtPath
-C:\Qt\6.8.3\msvc2022_64` force un emplacement Qt.
+a changé. `-Clean` efface le dossier de build avant (utile après une mise à jour de
+Craft). `-BuildType Debug` compile en débogage. `-QtPath` ne sert que sans
+Craft ; s'il y a un préfixe Craft, il est ignoré avec un avertissement.
 
 Équivalent manuel :
 
@@ -297,9 +313,10 @@ les lignes en rouge, suffisent pour diagnostiquer à distance.
 | `Refusing to update over local changes` | fichiers modifiés localement | `git stash` (ou commit), relancer |
 | `has diverged from origin` | commits locaux absents du serveur | `git push`, ou `git reset --hard origin/<branche>` si vous les abandonnez |
 | `git fetch` échoue trois fois | réseau, proxy, branche supprimée | vérifier l'accès à github.com |
-| `Qt 6.8 ... not found` | Qt installé ailleurs | `-QtPath C:\Qt\6.8.x\msvc2022_64` ou variable `Qt6_DIR` |
+| `No KDE Craft prefix and no Qt 6.8 found` | Craft pas installé, ou racine non standard | `install-craft.ps1`, ou `SENTINEL_CRAFT_ROOT` vers votre racine |
 | `Visual Studio 2022 with C++ workload not found` | Build Tools absents ou sans C++ | réinstaller avec le workload « Desktop development with C++ » |
-| `ECM/KF6 not found` puis échec CMake | Craft non installé | `admin\win\scripts\install-dependencies.ps1 -UseCraft` |
+| `The prefix is incomplete` (install-craft -Verify) | installation Craft interrompue | relancer `install-craft.ps1`, il reprend |
+| erreurs de liaison Qt, ou DLL incompatible au lancement | deux Qt mélangés (C:\Qt et Craft) | `-Clean`, ne garder que Craft, vérifier qu'aucun `C:\Qt\...\bin` n'est dans le `PATH` |
 | `nextclouddev.exe is running` au build | client de test ouvert | le quitter via l'icône de la barre des tâches |
 | `nextclouddev.exe exited immediately` | DLL manquante | lancer l'exe depuis une console pour lire le message ; vérifier `C:\Qt\...\bin` et `CraftRoot\bin` |
 | `No test matched` | build configuré sans tests | relancer `-Build` (le script active `BUILD_TESTING`) |

@@ -159,6 +159,9 @@ Benign workloads in the same suite (25 new photos, creating archives, editing te
 
 #### Windows (Quick Start)
 
+Dependencies (Qt 6, ECM, KF6, QtKeychain, OpenSSL, SQLite) all come from KDE Craft, installed by `admin\win\scripts\install-craft.ps1`; do not install a second Qt. Then `admin\win\scripts\test-sentinel.ps1 -All` updates, builds the test variant and runs the tests. Full walkthrough: [GUIDE-TEST-WINDOWS.md](GUIDE-TEST-WINDOWS.md).
+
+
 ```bash
 # Clone the repository
 git clone https://github.com/jlacerte/nextcloud-sentinel.git

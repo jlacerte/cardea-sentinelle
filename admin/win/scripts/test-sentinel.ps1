@@ -66,7 +66,9 @@ $Script:CompileScript = Join-Path $PSScriptRoot "compile-sentinel.ps1"
 $Script:SimulatorScript = Join-Path $Script:RepoDir "test\scripts\simulate-ransomware.py"
 $Script:BuildDir = Join-Path $Script:RepoDir "build-windows-$BuildType-dev"
 $Script:ExePath = Join-Path $Script:BuildDir "bin\nextclouddev.exe"
-$Script:CraftRoot = "$env:USERPROFILE\CraftRoot"
+$Script:CraftTarget = "windows-msvc2022_64-cl"
+$Script:CraftRoot = if ($env:SENTINEL_CRAFT_ROOT) { $env:SENTINEL_CRAFT_ROOT } else { "C:\CraftRoot" }
+$Script:InstallCraftScript = Join-Path $PSScriptRoot "install-craft.ps1"
 $Script:LogDir = Join-Path $Script:RepoDir "logs"
 $Script:LogFile = Join-Path $Script:LogDir ("test-sentinel-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
 
@@ -182,18 +184,36 @@ function Find-QtPath {
     return $null
 }
 
-# nextclouddev.exe and the test binaries need the Qt and Craft DLLs.
-function Set-RuntimePath {
-    $qt = Find-QtPath
-    if (-not $qt) {
-        throw "Qt 6.8 (msvc2022_64) not found. Install it with the Qt Online Installer into C:\Qt, or pass -QtPath C:\Qt\6.8.x\msvc2022_64"
+function Find-CraftPrefix {
+    foreach ($candidate in @((Join-Path $Script:CraftRoot $Script:CraftTarget),
+                             "C:\CraftRoot\$Script:CraftTarget",
+                             "$env:USERPROFILE\CraftRoot\$Script:CraftTarget")) {
+        if (Test-Path (Join-Path $candidate "bin\Qt6Core.dll")) { return $candidate }
     }
-    $parts = @("$qt\bin")
-    if (Test-Path "$Script:CraftRoot\bin") { $parts += "$Script:CraftRoot\bin" }
+    return $null
+}
+
+# nextclouddev.exe and the test binaries need the Qt and Craft DLLs. They must
+# be the ones the build was linked against: the Craft prefix (which holds Qt)
+# goes first; a standalone C:\Qt is only used when there is no Craft prefix.
+function Set-RuntimePath {
+    $parts = @()
+    $craft = Find-CraftPrefix
+    if ($craft) {
+        $parts += "$craft\bin"
+        $env:Qt6_DIR = "$craft\lib\cmake\Qt6"
+        Write-Step "Runtime PATH: Craft prefix $craft (Qt from Craft)"
+    } else {
+        $qt = Find-QtPath
+        if (-not $qt) {
+            throw "No KDE Craft prefix and no standalone Qt found. Run .\install-craft.ps1 (recommended), or pass -QtPath C:\Qt\6.8.x\msvc2022_64"
+        }
+        $parts += "$qt\bin"
+        $env:Qt6_DIR = $qt
+        Write-Warn "No Craft prefix; using standalone Qt $qt. The build must have used the same Qt."
+    }
     if (Test-Path "$Script:BuildDir\bin") { $parts += "$Script:BuildDir\bin" }
     $env:PATH = ($parts -join ";") + ";" + $env:PATH
-    $env:Qt6_DIR = $qt
-    Write-Step "Runtime PATH set (Qt: $qt)"
 }
 
 function Find-Python {
@@ -235,6 +255,9 @@ function Step-Prerequisites {
             throw "cmake not found. Install it with: winget install Kitware.CMake (then open a new PowerShell)"
         }
         Write-Step "cmake: $((cmake --version | Select-Object -First 1))"
+        if (-not (Find-CraftPrefix)) {
+            Write-Warn "No KDE Craft prefix found (expected $Script:CraftRoot\$Script:CraftTarget). Run .\install-craft.ps1 first unless you build against a standalone Qt."
+        }
     }
 
     if ($Simulate) {
@@ -363,7 +386,7 @@ function Step-Run {
     Start-Process -FilePath $Script:ExePath -WorkingDirectory (Split-Path $Script:ExePath)
     Start-Sleep -Seconds 3
     if (-not (Get-Process -Name "nextclouddev" -ErrorAction SilentlyContinue)) {
-        throw "nextclouddev.exe exited immediately. Usually a missing DLL: run it from a console to see the message, or check that Qt\bin and CraftRoot\bin exist."
+        throw "nextclouddev.exe exited immediately. Usually a missing or mismatched DLL: run it from a console to see the message, and make sure the build and this script use the same Craft prefix (install-craft.ps1 -Verify)."
     }
     Write-Step "nextclouddev.exe is running (look for the tray icon)"
     Write-Info "First start: add ONLY your TEST account, with your TEST folder as the sync folder."
