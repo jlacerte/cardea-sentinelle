@@ -35,7 +35,7 @@
 
 We are interested in vulnerabilities related to:
 
-- **Kill Switch bypass**: Ways to disable or circumvent the protection
+- **Kill Switch bypass**: Ways to disable or circumvent the protection beyond those already documented in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md)
 - **False negative scenarios**: Ransomware patterns that evade detection
 - **Data exposure**: Threat logs or backups leaking sensitive information
 - **Privilege escalation**: Unauthorized access through Sentinel components

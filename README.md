@@ -149,6 +149,8 @@ Benign workloads in the same suite (25 new photos, creating archives, editing te
 | Suspicious file patterns | No detection | **Alert + auto-pause** |
 | Recovery options | Restore from server | **Local backup + server intact** |
 
+Sentinel is not an antivirus and does not replace a 3-2-1 backup: it stops the upload of damaged files, and an attacker with the user's privileges can disable it. What it protects, what it does not, and why are in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
+
 ---
 
 ## Try It Yourself
@@ -299,6 +301,8 @@ All PRs are automatically reviewed by [CodeRabbit AI](https://coderabbit.ai) in 
 Found a security vulnerability? Please read [SECURITY.md](SECURITY.md) for responsible disclosure guidelines.
 
 **Do NOT open a public issue for security vulnerabilities.**
+
+The threat model (what the Kill Switch protects, known bypasses, residual risk) is in [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md).
 
 ---
 
