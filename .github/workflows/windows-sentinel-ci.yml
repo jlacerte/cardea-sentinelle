@@ -157,7 +157,7 @@ jobs:
           Write-Host "::group::Run Kill Switch Tests"
 
           # Run Kill Switch specific tests
-          ctest -R KillSwitch --output-on-failure --timeout 300
+          ctest -R "KillSwitch|FormatSignature" --output-on-failure --timeout 300
           $killSwitchResult = $LASTEXITCODE
 
           Write-Host "::endgroup::"
