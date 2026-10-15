@@ -156,6 +156,13 @@ function Initialize-VSEnvironment {
 
     Write-Step "Initializing Visual Studio environment..."
 
+    # vcvars*.bat calls vswhere.exe by name; make sure the VS Installer folder
+    # is in PATH so it is found on machines with several VS editions (see issue #24).
+    $vsInstallerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+    if ((Test-Path "$vsInstallerDir\vswhere.exe") -and ($env:PATH -notlike "*$vsInstallerDir*")) {
+        $env:PATH = "$vsInstallerDir;$env:PATH"
+    }
+
     # Run vcvars64.bat and capture environment
     $envVars = cmd /c "`"$vcvarsall`" && set" 2>&1
 
