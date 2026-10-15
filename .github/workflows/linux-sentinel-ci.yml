@@ -83,7 +83,7 @@ jobs:
           chown -R testuser:testuser .
 
           echo "::group::Kill Switch Tests"
-          su -c 'xvfb-run ctest -R 'KillSwitch|FormatSignature' --output-on-failure --timeout 300' testuser
+          su -c 'xvfb-run ctest -R "KillSwitch|FormatSignature" --output-on-failure --timeout 300' testuser
           echo "::endgroup::"
 
       # NOTE: Upstream Nextcloud tests are run for visibility only.
@@ -145,7 +145,7 @@ jobs:
           chown -R testuser:testuser .
 
           echo "::group::Kill Switch Tests"
-          su -c 'xvfb-run ctest -R 'KillSwitch|FormatSignature' --output-on-failure --timeout 300' testuser
+          su -c 'xvfb-run ctest -R "KillSwitch|FormatSignature" --output-on-failure --timeout 300' testuser
           echo "::endgroup::"
 
       # NOTE: Upstream Nextcloud tests are run for visibility only.
@@ -211,7 +211,7 @@ jobs:
           cd build-coverage
           useradd -m -s /bin/bash testuser || true
           chown -R testuser:testuser .
-          su -c 'xvfb-run ctest -R 'KillSwitch|FormatSignature' --output-on-failure --timeout 300' testuser
+          su -c 'xvfb-run ctest -R "KillSwitch|FormatSignature" --output-on-failure --timeout 300' testuser
 
       - name: Generate coverage report
         run: |
