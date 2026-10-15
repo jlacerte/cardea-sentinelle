@@ -46,6 +46,7 @@
 #include "libsync/killswitch/detectors/patterndetector.h"
 #include "libsync/killswitch/threatlogger.h"
 #include "libsync/killswitch/actions/backupaction.h"
+#include "killswitch/sentinelcontroller.h"
 #include "systray.h"
 
 #include "config.h"
@@ -574,6 +575,13 @@ void Application::setupAccountsAndFolders()
     backupAction->setMaxBackupSizeMB(500);  // 500MB max
     backupAction->setRetentionDays(7);       // Keep 7 days
     killSwitch->registerAction(backupAction);
+
+    // The controller is the user-facing side of the kill switch: it pauses
+    // the sync folders and raises the alert dialog when the manager trips,
+    // and resumes exactly those folders once the user resets it. It is
+    // parented to the application so it outlives the FolderMan (which owns
+    // the manager); the slots guard against FolderMan::instance() being gone.
+    _sentinelController = new SentinelController(killSwitch, this);
 
     // Apply the configuration persisted by Settings > Kill Switch. Without
     // this the manager always starts with its built-in defaults, whatever

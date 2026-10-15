@@ -36,6 +36,7 @@ class Theme;
 class Folder;
 class ShellExtensionsServer;
 class SslErrorDialog;
+class SentinelController;
 
 /**
  * @brief The Application class
@@ -141,6 +142,7 @@ private:
     QString _setLanguage;
 
     QScopedPointer<FolderMan> _folderManager;
+    SentinelController *_sentinelController = nullptr;
 #if defined(Q_OS_WIN)
     QScopedPointer<ShellExtensionsServer> _shellExtensionsServer;
 #endif

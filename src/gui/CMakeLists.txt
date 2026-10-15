@@ -117,6 +117,8 @@ set(client_SRCS
     killswitch/threathistorydialog.h
     killswitch/killswitchdashboard.cpp
     killswitch/threathistorydialog.cpp
+    killswitch/sentinelcontroller.h
+    killswitch/sentinelcontroller.cpp
     legalnotice.h
     legalnotice.cpp
     ignorelisteditor.h
