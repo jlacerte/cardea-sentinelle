@@ -44,6 +44,7 @@
 #include "libsync/killswitch/detectors/entropydetector.h"
 #include "libsync/killswitch/detectors/canarydetector.h"
 #include "libsync/killswitch/detectors/patterndetector.h"
+#include "libsync/killswitch/detectors/formatsignaturedetector.h"
 #include "libsync/killswitch/threatlogger.h"
 #include "libsync/killswitch/actions/backupaction.h"
 #include "killswitch/sentinelcontroller.h"
@@ -514,6 +515,8 @@ void Application::setupAccountsAndFolders()
     killSwitch->registerDetector(std::make_shared<PatternDetector>());
     killSwitch->registerDetector(std::make_shared<CanaryDetector>());
     killSwitch->registerDetector(std::make_shared<MassDeleteDetector>());
+    // 5. FormatSignatureDetector - reads the first 4 KB and the tail of the file
+    killSwitch->registerDetector(std::make_shared<FormatSignatureDetector>());
     killSwitch->registerDetector(std::make_shared<EntropyDetector>());
 
     // Initialize threat logger
@@ -599,7 +602,7 @@ void Application::setupAccountsAndFolders()
         }
     }
 
-    qCInfo(lcApplication) << "Kill Switch protection initialized with 4 detectors, backup action, and notifications";
+    qCInfo(lcApplication) << "Kill Switch protection initialized with 5 detectors, backup action, and notifications";
 
     ConfigFile configFile;
     configFile.setMigrationPhase(ConfigFile::MigrationPhase::SetupUsers);

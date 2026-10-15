@@ -19,6 +19,8 @@ set(KILLSWITCH_SOURCES
     detectors/canarydetector.h
     detectors/patterndetector.cpp
     detectors/patterndetector.h
+    detectors/formatsignaturedetector.cpp
+    detectors/formatsignaturedetector.h
 
     # Actions
     actions/syncaction.h
