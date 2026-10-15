@@ -969,6 +969,289 @@ private slots:
         QCOMPARE(result.level, ThreatLevel::High);
     }
 
+    void testPatternDetectorRandomExtensionPositives()
+    {
+        // Modern RaaS families append a random per-victim extension that no
+        // static list can contain (research: LockBit 3.0/4.0, BlackCat, Qilin).
+        PatternDetector detector;
+
+        QVERIFY(detector.looksLikeRandomExtension("HLJkNskOq"));     // LockBit 3.0
+        QVERIFY(detector.looksLikeRandomExtension("9_bJ6s6BxF"));    // Qilin/Agenda
+        QVERIFY(detector.looksLikeRandomExtension("a7Fk3Qz"));       // BlackCat-style
+        QVERIFY(detector.looksLikeRandomExtension("xk9dq2z"));       // BlackCat [a-z0-9]{7}
+        QVERIFY(detector.looksLikeRandomExtension("pQzX7bR2mK9t"));  // LockBit 4.0, 12 chars
+        QVERIFY(detector.looksLikeRandomExtension("Kf3-pL9_zT"));    // separators allowed
+    }
+
+    void testPatternDetectorRandomExtensionNegatives()
+    {
+        PatternDetector detector;
+
+        // Real extensions of 6+ chars with digits or mixed case: allowlisted
+        QVERIFY(!detector.looksLikeRandomExtension("sqlite3"));
+        QVERIFY(!detector.looksLikeRandomExtension("SQLITE3"));
+        QVERIFY(!detector.looksLikeRandomExtension("sha256"));
+        QVERIFY(!detector.looksLikeRandomExtension("x86_64"));
+        QVERIFY(!detector.looksLikeRandomExtension("DS_Store"));
+        QVERIFY(!detector.looksLikeRandomExtension("tax2024"));   // versioned word shape
+
+        // Purely lowercase words are never random
+        QVERIFY(!detector.looksLikeRandomExtension("backup"));
+        QVERIFY(!detector.looksLikeRandomExtension("torrent"));
+        QVERIFY(!detector.looksLikeRandomExtension("crdownload"));
+        QVERIFY(!detector.looksLikeRandomExtension("markdown"));
+        QVERIFY(!detector.looksLikeRandomExtension("encrypted")); // fixed list handles it
+
+        // Decision: a capitalised word ("Backup") has mixed case only through
+        // its leading capital. That is how humans name things, not how
+        // ransomware generates suffixes, so it is NOT random.
+        QVERIFY(!detector.looksLikeRandomExtension("Backup"));
+        QVERIFY(!detector.looksLikeRandomExtension("TORRENT"));   // pure uppercase
+
+        // Too short / too long / wrong characters / no letters
+        QVERIFY(!detector.looksLikeRandomExtension("txt"));
+        QVERIFY(!detector.looksLikeRandomExtension("docx"));
+        QVERIFY(!detector.looksLikeRandomExtension("aB3"));
+        QVERIFY(!detector.looksLikeRandomExtension("aB3dE5fG7hI9jK1lM3"));  // 18 chars
+        QVERIFY(!detector.looksLikeRandomExtension("2024-01-15"));           // date suffix
+        QVERIFY(!detector.looksLikeRandomExtension("1699999999"));           // timestamp
+        QVERIFY(!detector.looksLikeRandomExtension("aB3!dE5f"));             // '!' not allowed
+        QVERIFY(!detector.looksLikeRandomExtension(""));
+    }
+
+    void testPatternDetectorRandomExtensionAfterNormal()
+    {
+        PatternDetector detector;
+
+        QVERIFY(detector.hasRandomExtensionAfterNormal("invoice.pdf.HLJkNskOq"));
+        QVERIFY(detector.hasRandomExtensionAfterNormal("photo.jpg.9_bJ6s6BxF"));
+        QVERIFY(detector.hasRandomExtensionAfterNormal("budget.xlsx.a7Fk3Qz"));
+        QVERIFY(detector.hasRandomExtensionAfterNormal("Vacation.HEIC.pQzX7bR2mK9t"));
+        QVERIFY(detector.hasRandomExtensionAfterNormal("notes.md.xk9dq2z"));
+
+        // Needs a normal extension before the random one
+        QVERIFY(!detector.hasRandomExtensionAfterNormal("invoice.HLJkNskOq"));
+        QVERIFY(!detector.hasRandomExtensionAfterNormal("invoice.pdf"));
+        // Last part must look random
+        QVERIFY(!detector.hasRandomExtensionAfterNormal("invoice.pdf.backup"));
+        QVERIFY(!detector.hasRandomExtensionAfterNormal("notes.txt.2024-01-15"));
+        QVERIFY(!detector.hasRandomExtensionAfterNormal("data.db.sqlite3"));
+        // Hidden rsync temporaries ".name.ext.XXXXXX" are skipped
+        QVERIFY(!detector.hasRandomExtensionAfterNormal(".invoice.pdf.Xk3f9A"));
+    }
+
+    void testPatternDetectorRandomExtensionSingleIsMedium()
+    {
+        // A single random-extension hit is less certain than the fixed list:
+        // Medium, which does not trigger the manager (it triggers at High).
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/invoice.pdf.HLJkNskOq";
+
+        QVector<KillSwitchManager::Event> events;
+        ThreatInfo result = detector.analyze(item, events);
+
+        QCOMPARE(result.level, ThreatLevel::Medium);
+        QVERIFY(result.description.contains("Random-looking"));
+        QVERIFY(result.affectedFiles.first().endsWith("invoice.pdf.HLJkNskOq"));
+
+        // Does not trigger the manager on its own
+        _manager->registerDetector(std::make_shared<PatternDetector>());
+        QVERIFY(!_manager->analyzeItem(item));
+        QVERIFY(!_manager->isTriggered());
+    }
+
+    void testPatternDetectorRandomExtensionBurstIsHigh()
+    {
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        QVector<KillSwitchManager::Event> events;
+        events.append({QDateTime::currentDateTime(), "CREATE", "Documents/a.docx.HLJkNskOq"});
+        events.append({QDateTime::currentDateTime(), "RENAME", "Documents/b.xlsx.HLJkNskOq"});
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/c.pdf.HLJkNskOq";
+
+        // 2 in the window + this one = threshold
+        ThreatInfo result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::High);
+    }
+
+    void testPatternDetectorRandomExtensionMassIsCritical()
+    {
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        QVector<KillSwitchManager::Event> events;
+        for (int i = 0; i < 5; i++) {
+            events.append({QDateTime::currentDateTime(), "CREATE",
+                           QString("Photos/IMG_%1.jpg.9_bJ6s6BxF").arg(i)});
+        }
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Photos/IMG_5.jpg.9_bJ6s6BxF";
+
+        // 5 + 1 = 2 * threshold
+        ThreatInfo result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::Critical);
+        QVERIFY(result.description.contains("Mass"));
+    }
+
+    void testPatternDetectorRenameAppendsRandomExtension()
+    {
+        // LockBit renames in place: report.docx -> report.docx.HLJkNskOq
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_RENAME;
+        item._file = "Documents/report.docx";
+        item._renameTarget = "Documents/report.docx.HLJkNskOq";
+
+        QVector<KillSwitchManager::Event> events;
+        ThreatInfo result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::Medium);
+        QVERIFY(result.affectedFiles.first().endsWith("report.docx.HLJkNskOq"));
+
+        // The rename counts towards the window like any other suspicious file
+        events.append({QDateTime::currentDateTime(), "RENAME", "Documents/report.docx.HLJkNskOq"});
+        events.append({QDateTime::currentDateTime(), "RENAME", "Documents/data.csv.HLJkNskOq"});
+        item._file = "Documents/plan.pptx";
+        item._renameTarget = "Documents/plan.pptx.HLJkNskOq";
+        result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::High);
+
+        // Appending to a name without a "normal" extension is still suspicious
+        // when the target is exactly the original plus one suffix
+        SyncFileItem makefile;
+        makefile._instruction = CSYNC_INSTRUCTION_RENAME;
+        makefile._file = "src/Makefile";
+        makefile._renameTarget = "src/Makefile.HLJkNskOq";
+        result = detector.analyze(makefile, {});
+        QCOMPARE(result.level, ThreatLevel::Medium);
+
+        // ... also with a fixed-list extension ("Makefile.locked" is Low on its own)
+        makefile._renameTarget = "src/Makefile.locked";
+        result = detector.analyze(makefile, {});
+        QCOMPARE(result.level, ThreatLevel::Low);
+
+        // A legitimate rename (different name) is not suspicious
+        SyncFileItem legit;
+        legit._instruction = CSYNC_INSTRUCTION_RENAME;
+        legit._file = "Documents/draft.docx";
+        legit._renameTarget = "Documents/final.docx";
+        result = detector.analyze(legit, {});
+        QCOMPARE(result.level, ThreatLevel::None);
+    }
+
+    void testPatternDetectorDeleteOfOriginalEscalates()
+    {
+        // Encrypt-to-new-file-then-delete-original: invoice.pdf.HLJkNskOq
+        // appears while invoice.pdf was deleted in the same window.
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/invoice.pdf.HLJkNskOq";
+
+        QVector<KillSwitchManager::Event> events;
+        events.append({QDateTime::currentDateTime(), "DELETE", "Documents/invoice.pdf"});
+
+        ThreatInfo result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::High);  // Medium -> High
+        QVERIFY(result.description.contains("original file deleted"));
+
+        // A delete of an unrelated file (or the same name in another folder) does not
+        events.clear();
+        events.append({QDateTime::currentDateTime(), "DELETE", "Archive/invoice.pdf"});
+        events.append({QDateTime::currentDateTime(), "DELETE", "Documents/other.pdf"});
+        result = detector.analyze(item, events);
+        QCOMPARE(result.level, ThreatLevel::Medium);
+
+        // The fixed-list single hit escalates as well: Low -> Medium
+        SyncFileItem fixedItem;
+        fixedItem._instruction = CSYNC_INSTRUCTION_NEW;
+        fixedItem._file = "Documents/notes.locked";
+        events.clear();
+        events.append({QDateTime::currentDateTime(), "DELETE", "Documents/notes"});
+        result = detector.analyze(fixedItem, events);
+        QCOMPARE(result.level, ThreatLevel::Medium);
+    }
+
+    void testPatternDetectorModernRansomNotes()
+    {
+        PatternDetector detector;
+
+        QVERIFY(detector.isRansomNote("HLJkNskOq.README.txt"));          // LockBit 3.0
+        QVERIFY(detector.isRansomNote("RECOVER-a7fk3qz-FILES.txt"));     // BlackCat
+        QVERIFY(detector.isRansomNote("README-RECOVER-9_bJ6s6BxF.txt")); // Qilin
+        QVERIFY(detector.isRansomNote("akira_readme.txt"));              // Akira
+        QVERIFY(detector.isRansomNote("!!!READ_ME_MEDUSA!!!.txt"));      // Medusa
+        QVERIFY(detector.isRansomNote("How To Restore Your Files.txt")); // RansomHub
+        QVERIFY(detector.isRansomNote("ClopReadMe.txt"));                // Clop
+        QVERIFY(detector.isRansomNote("README_C_I_0P.TXT"));             // Clop
+        QVERIFY(detector.isRansomNote("readme.BlackSuit.txt"));          // BlackSuit
+
+        // They are Critical through analyze()
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/HLJkNskOq.README.txt";
+        QCOMPARE(detector.analyze(item, {}).level, ThreatLevel::Critical);
+        item._file = "Documents/RECOVER-a7fk3qz-FILES.txt";
+        QCOMPARE(detector.analyze(item, {}).level, ThreatLevel::Critical);
+
+        // Ordinary names must stay harmless
+        QVERIFY(!detector.isRansomNote("README.txt"));
+        QVERIFY(!detector.isRansomNote("readme.md"));
+        QVERIFY(!detector.isRansomNote("notes.txt"));
+        QVERIFY(!detector.isRansomNote("project_notes.txt"));
+        QVERIFY(!detector.isRansomNote("project.README.txt"));   // lowercase word, not an ID
+        QVERIFY(!detector.isRansomNote("module.readme.txt"));
+        QVERIFY(!detector.isRansomNote("recover-files.txt"));    // no ext part
+        QVERIFY(!detector.isRansomNote("readme.blacksuit.md"));
+    }
+
+    void testPatternDetectorLegitimateNamesStayNone()
+    {
+        PatternDetector detector;
+        detector.setThreshold(3);
+
+        const QStringList legit = {
+            "archive.tar.gz",
+            "app.min.js",
+            "data.sqlite3",
+            "cache.db.sqlite-journal",
+            "Report (conflicted copy 2026-01-01).docx",
+            "backup.tar.bz2",
+            "notes.txt.2024-01-15",
+            "libfoo.so.1.2.3",
+            "video.mp4.part01",
+            "firmware.x86_64.AppImage",
+            "Photo.JPEG",
+            "return.tax2024",
+            "Important Backup.docx.Backup",
+            ".DS_Store",
+            "rsync-temp/.invoice.pdf.Xk3f9A",
+        };
+
+        for (const QString &name : legit) {
+            SyncFileItem item;
+            item._instruction = CSYNC_INSTRUCTION_NEW;
+            item._file = name;
+            const ThreatInfo result = detector.analyze(item, {});
+            QVERIFY2(result.level == ThreatLevel::None,
+                     qPrintable(QStringLiteral("Should be None: %1 (got %2)")
+                                    .arg(name).arg(static_cast<int>(result.level))));
+        }
+    }
+
     void testPatternDetectorFullIntegration()
     {
         auto patternDetector = std::make_shared<PatternDetector>();
