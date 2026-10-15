@@ -35,6 +35,14 @@ SentinelController::SentinelController(KillSwitchManager *manager, QObject *pare
             this, &SentinelController::slotSyncPaused);
     connect(_manager.data(), &KillSwitchManager::syncResumed,
             this, &SentinelController::slotSyncResumed);
+    // Audit mode: log only, never pause or raise the dialog (see the class comment).
+    connect(_manager.data(), &KillSwitchManager::auditTriggered,
+            this, [](const ThreatInfo &threat) {
+                qCWarning(lcSentinelController) << "AUDIT: Kill Switch would have paused sync -"
+                                                << threat.description
+                                                << "- Detector:" << threat.detectorName
+                                                << "- Files:" << threat.affectedFiles.size();
+            });
 
     if (auto *folderMan = FolderMan::instance()) {
         connect(folderMan, &FolderMan::folderListChanged,
@@ -276,7 +284,9 @@ void SentinelController::restorePersistedState()
                                       << "- re-arming it";
 
     // Re-trip the manager: it emits syncPaused(), which brings the dialog
-    // back and pauses any folder that is not paused yet.
+    // back and pauses any folder that is not paused yet. The controller is
+    // created before the persisted mode is applied (Application), so the
+    // manager is still in Protect mode here and trigger() really trips it.
     _manager->trigger(tr("Kill Switch was active when the client was last closed (%1): %2")
                           .arg(previousTime, previousReason));
 }

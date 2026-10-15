@@ -43,6 +43,15 @@ private:
         file.close();
     }
 
+    /// A ransom note creation: Critical for the PatternDetector, so it trips the switch on its own
+    static SyncFileItem ransomNoteItem()
+    {
+        SyncFileItem item;
+        item._instruction = CSYNC_INSTRUCTION_NEW;
+        item._file = "Documents/HOW_TO_DECRYPT.txt";
+        return item;
+    }
+
 private slots:
     void initTestCase()
     {
@@ -184,6 +193,218 @@ private slots:
 
         QVERIFY(_manager->isTriggered());
         QVERIFY(action->received.isEmpty());
+    }
+
+    // ==================== Audit mode ====================
+
+    void testManagerDefaultModeIsProtect()
+    {
+        QCOMPARE(_manager->mode(), KillSwitchMode::Protect);
+        QCOMPARE(_manager->auditTriggerCount(), 0);
+        QVERIFY(_manager->auditTriggers().isEmpty());
+
+        QSignalSpy modeSpy(_manager, &KillSwitchManager::modeChanged);
+        _manager->setMode(KillSwitchMode::Audit);
+        QCOMPARE(_manager->mode(), KillSwitchMode::Audit);
+        QCOMPARE(modeSpy.count(), 1);
+
+        // Setting the same mode again is a no-op
+        _manager->setMode(KillSwitchMode::Audit);
+        QCOMPARE(modeSpy.count(), 1);
+    }
+
+    void testManagerModeStringRoundTrip()
+    {
+        QCOMPARE(KillSwitchManager::modeToString(KillSwitchMode::Protect), QStringLiteral("protect"));
+        QCOMPARE(KillSwitchManager::modeToString(KillSwitchMode::Audit), QStringLiteral("audit"));
+        QCOMPARE(KillSwitchManager::modeFromString("audit"), KillSwitchMode::Audit);
+        QCOMPARE(KillSwitchManager::modeFromString(" Audit "), KillSwitchMode::Audit);
+        QCOMPARE(KillSwitchManager::modeFromString("protect"), KillSwitchMode::Protect);
+        QCOMPARE(KillSwitchManager::modeFromString(""), KillSwitchMode::Protect);
+        QCOMPARE(KillSwitchManager::modeFromString("garbage"), KillSwitchMode::Protect);
+    }
+
+    void testManagerAuditModeDetectsButNeverPauses()
+    {
+        struct RecordingAction : public SyncAction {
+            QString name() const override { return QStringLiteral("RecordingAction"); }
+            void execute(const ThreatInfo &threat) override { received.append(threat); }
+            QVector<ThreatInfo> received;
+        };
+
+        auto action = std::make_shared<RecordingAction>();
+        _manager->registerAction(action);
+        _manager->registerDetector(std::make_shared<PatternDetector>());
+        _manager->setMode(KillSwitchMode::Audit);
+
+        QSignalSpy auditSpy(_manager, &KillSwitchManager::auditTriggered);
+        QSignalSpy pausedSpy(_manager, &KillSwitchManager::syncPaused);
+        QSignalSpy triggeredSpy(_manager, &KillSwitchManager::triggeredChanged);
+        QSignalSpy threatSpy(_manager, &KillSwitchManager::threatDetected);
+
+        AnalysisContext context;
+        context.localRootPath = "/home/alice/Nextcloud";
+
+        // Critical finding: in Protect mode this blocks and trips the switch
+        QVERIFY(!_manager->analyzeItem(ransomNoteItem(), context));
+
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(pausedSpy.count(), 0);
+        QCOMPARE(triggeredSpy.count(), 0);
+        QVERIFY(action->received.isEmpty());
+
+        // ... but it is still detected, logged and recorded as a would-be trigger
+        QCOMPARE(threatSpy.count(), 1);
+        QCOMPARE(auditSpy.count(), 1);
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+        QCOMPARE(_manager->auditTriggers().size(), 1);
+        QCOMPARE(_manager->auditTriggers().first().level, ThreatLevel::Critical);
+        QCOMPARE(_manager->auditTriggers().first().detectorName, QStringLiteral("PatternDetector"));
+        QCOMPARE(_manager->auditTriggers().first().affectedFiles,
+                 QStringList{QStringLiteral("/home/alice/Nextcloud/Documents/HOW_TO_DECRYPT.txt")});
+        QCOMPARE(_manager->threats().size(), 1);
+
+        // Every further would-be trigger is counted (Protect mode would have
+        // short-circuited on the first one)
+        QVERIFY(!_manager->analyzeItem(ransomNoteItem(), context));
+        QCOMPARE(auditSpy.count(), 2);
+        QCOMPARE(_manager->auditTriggerCount(), 2);
+        QVERIFY(!_manager->isTriggered());
+    }
+
+    void testManagerAuditModeManualTriggerIsRecordedOnly()
+    {
+        _manager->setMode(KillSwitchMode::Audit);
+        QSignalSpy auditSpy(_manager, &KillSwitchManager::auditTriggered);
+        QSignalSpy pausedSpy(_manager, &KillSwitchManager::syncPaused);
+
+        _manager->trigger("manual");
+
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(pausedSpy.count(), 0);
+        QCOMPARE(auditSpy.count(), 1);
+        QCOMPARE(auditSpy.takeFirst().at(0).value<ThreatInfo>().description, QStringLiteral("manual"));
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+    }
+
+    void testManagerAuditModeBatchDeletionIsRecordedOnly()
+    {
+        _manager->setMode(KillSwitchMode::Audit);
+        _manager->setDeleteThreshold(5, 60);
+        QSignalSpy auditSpy(_manager, &KillSwitchManager::auditTriggered);
+
+        QVector<SyncFileItem> items;
+        for (int i = 0; i < 20; ++i) {
+            SyncFileItem item;
+            item._instruction = CSYNC_INSTRUCTION_REMOVE;
+            item._file = QStringLiteral("doc%1.txt").arg(i);
+            items.append(item);
+        }
+
+        QVERIFY(!_manager->analyzeBatch(items));
+        QVERIFY(!_manager->isTriggered());
+        QVERIFY(auditSpy.count() >= 1);
+        QCOMPARE(_manager->auditTriggerCount(), auditSpy.count());
+    }
+
+    void testManagerAuditToProtectDoesNotRetroactivelyTrigger()
+    {
+        _manager->registerDetector(std::make_shared<PatternDetector>());
+        _manager->setMode(KillSwitchMode::Audit);
+
+        QVERIFY(!_manager->analyzeItem(ransomNoteItem()));
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+
+        QSignalSpy pausedSpy(_manager, &KillSwitchManager::syncPaused);
+        _manager->setMode(KillSwitchMode::Protect);
+
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(pausedSpy.count(), 0);
+
+        // A harmless item afterwards does not resurrect the old finding
+        SyncFileItem benign;
+        benign._instruction = CSYNC_INSTRUCTION_NEW;
+        benign._file = "Documents/notes.txt";
+        QVERIFY(!_manager->analyzeItem(benign));
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(pausedSpy.count(), 0);
+
+        // The audit record is kept for the user to look at
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+
+        // A new finding in Protect mode trips the switch as usual
+        QVERIFY(_manager->analyzeItem(ransomNoteItem()));
+        QVERIFY(_manager->isTriggered());
+        QCOMPARE(pausedSpy.count(), 1);
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+    }
+
+    void testManagerProtectToAuditKeepsTriggeredState()
+    {
+        _manager->registerDetector(std::make_shared<PatternDetector>());
+        _manager->trigger("real attack");
+        QVERIFY(_manager->isTriggered());
+
+        QSignalSpy resumedSpy(_manager, &KillSwitchManager::syncResumed);
+        QSignalSpy triggeredSpy(_manager, &KillSwitchManager::triggeredChanged);
+        _manager->setMode(KillSwitchMode::Audit);
+
+        // Still tripped: nothing is silently resumed
+        QVERIFY(_manager->isTriggered());
+        QCOMPARE(resumedSpy.count(), 0);
+        QCOMPARE(triggeredSpy.count(), 0);
+        QVERIFY(_manager->analyzeItem(ransomNoteItem())); // still blocked
+        QCOMPARE(_manager->auditTriggerCount(), 0);
+
+        // The user resets, and from then on audit semantics apply
+        _manager->reset();
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(resumedSpy.count(), 1);
+
+        QVERIFY(!_manager->analyzeItem(ransomNoteItem()));
+        QVERIFY(!_manager->isTriggered());
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+    }
+
+    void testManagerClearAuditTriggers()
+    {
+        _manager->setMode(KillSwitchMode::Audit);
+        _manager->trigger("one");
+        _manager->trigger("two");
+        QCOMPARE(_manager->auditTriggerCount(), 2);
+        QCOMPARE(_manager->auditTriggers().size(), 2);
+
+        _manager->clearAuditTriggers();
+        QCOMPARE(_manager->auditTriggerCount(), 0);
+        QVERIFY(_manager->auditTriggers().isEmpty());
+
+        // Clearing again is harmless
+        _manager->clearAuditTriggers();
+        QCOMPARE(_manager->auditTriggerCount(), 0);
+
+        // reset() does not touch the audit record; the GUI clears it explicitly
+        _manager->trigger("three");
+        _manager->reset();
+        QCOMPARE(_manager->auditTriggerCount(), 1);
+    }
+
+    void testManagerAuditTriggersAreCapped()
+    {
+        _manager->setMode(KillSwitchMode::Audit);
+        QSignalSpy auditSpy(_manager, &KillSwitchManager::auditTriggered);
+
+        for (int i = 0; i < 1005; ++i) {
+            _manager->trigger(QStringLiteral("reason %1").arg(i));
+        }
+
+        QCOMPARE(auditSpy.count(), 1005);
+        QCOMPARE(_manager->auditTriggerCount(), 1005);
+        const auto kept = _manager->auditTriggers();
+        QCOMPARE(kept.size(), 1000);
+        // The oldest entries are dropped, the newest kept
+        QCOMPARE(kept.first().description, QStringLiteral("reason 5"));
+        QCOMPARE(kept.last().description, QStringLiteral("reason 1004"));
+        QVERIFY(!_manager->isTriggered());
     }
 
     void testManagerConfigurationPropagatesToDetectors()

@@ -34,6 +34,24 @@ enum class ThreatLevel {
 };
 
 /**
+ * @brief Operating mode of the kill switch
+ *
+ * Protect: a High/Critical finding trips the switch, the registered actions
+ *          run, syncPaused() is emitted and every item is blocked until the
+ *          user resets.
+ * Audit:   detectors run and log exactly as in Protect mode, but a finding
+ *          that would have tripped the switch is only recorded (see
+ *          auditTriggers()) and announced through auditTriggered(). Nothing
+ *          is paused or blocked and no action is executed. This is meant for
+ *          calibrating thresholds on real users without inflicting
+ *          false-positive pauses.
+ */
+enum class KillSwitchMode {
+    Protect = 0,
+    Audit = 1
+};
+
+/**
  * @brief Structure describing a detected threat
  */
 struct OWNCLOUDSYNC_EXPORT ThreatInfo {
@@ -130,8 +148,54 @@ public:
 
     /**
      * @brief Check if the kill switch has been triggered
+     *
+     * Never becomes true through analysis while in Audit mode. A trigger that
+     * happened in Protect mode survives a switch to Audit mode until reset().
      */
     bool isTriggered() const;
+
+    /**
+     * @brief Current operating mode (default: Protect)
+     */
+    KillSwitchMode mode() const;
+
+    /**
+     * @brief Switch between Protect and Audit mode
+     *
+     * Switching from Audit to Protect never trips the switch retroactively,
+     * even if a would-be trigger was recorded a moment ago. Switching from
+     * Protect to Audit while triggered keeps the triggered state (the sync
+     * stays paused) until the user calls reset().
+     */
+    void setMode(KillSwitchMode mode);
+
+    /**
+     * @brief Number of would-be triggers recorded in Audit mode
+     *
+     * Counts every would-be trigger since the last clearAuditTriggers(),
+     * even those no longer held by auditTriggers().
+     */
+    int auditTriggerCount() const;
+
+    /**
+     * @brief The most recent would-be triggers recorded in Audit mode (at most 1000)
+     */
+    QVector<ThreatInfo> auditTriggers() const;
+
+    /**
+     * @brief Forget the would-be triggers recorded in Audit mode
+     */
+    void clearAuditTriggers();
+
+    /**
+     * @brief Persisted setting value for a mode ("protect" / "audit")
+     */
+    static QString modeToString(KillSwitchMode mode);
+
+    /**
+     * @brief Parse a persisted mode value; anything unknown maps to Protect
+     */
+    static KillSwitchMode modeFromString(const QString &value);
 
     /**
      * @brief Get the current threat level
@@ -156,7 +220,8 @@ public:
      * @brief Analyze a sync item for threats
      * @param item The sync file item to analyze
      * @param context Where the item lives on disk (sync folder root)
-     * @return true if the item should be blocked
+     * @return true if the item should be blocked (never in Audit mode, unless
+     *         the switch was already tripped in Protect mode)
      */
     bool analyzeItem(const SyncFileItem &item, const AnalysisContext &context = AnalysisContext());
 
@@ -179,6 +244,9 @@ public:
      *
      * The threat (including its affected files) is handed to the registered
      * actions, so e.g. the backup action knows what to back up.
+     *
+     * In Audit mode this only records the would-be trigger and emits
+     * auditTriggered(); the switch is not tripped and no action runs.
      */
     void trigger(const ThreatInfo &threat);
 
@@ -206,6 +274,7 @@ public:
 
 signals:
     void enabledChanged(bool enabled);
+    void modeChanged(KillSwitchMode mode);
     void triggeredChanged(bool triggered);
     void threatLevelChanged(ThreatLevel level);
     void threatDetected(const ThreatInfo &threat);
@@ -213,19 +282,31 @@ signals:
     void syncResumed();
     void backupCreated(const QString &path);
 
+    /**
+     * @brief Emitted in Audit mode for every finding that would have tripped the switch
+     */
+    void auditTriggered(const ThreatInfo &threat);
+
 private slots:
     void onWindowTimeout();
     void evaluateThreatLevel();
 
 private:
     void executeActions(const ThreatInfo &threat);
+    void recordAuditTrigger(const ThreatInfo &threat);
     void recordEvent(const QString &eventType, const QString &path);
 
     static KillSwitchManager *s_instance;
 
     bool m_enabled = true;
     bool m_triggered = false;
+    KillSwitchMode m_mode = KillSwitchMode::Protect;
     ThreatLevel m_threatLevel = ThreatLevel::None;
+
+    // Audit mode bookkeeping
+    static constexpr int MaxAuditTriggers = 1000;
+    QVector<ThreatInfo> m_auditTriggers;
+    int m_auditTriggerCount = 0;
 
     QVector<std::shared_ptr<ThreatDetector>> m_detectors;
     QVector<std::shared_ptr<SyncAction>> m_actions;

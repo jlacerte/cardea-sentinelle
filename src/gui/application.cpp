@@ -527,6 +527,14 @@ void Application::setupAccountsAndFolders()
         threatLogger->logThreat(threat, QStringLiteral("detected"));
     });
 
+    // Audit mode: a would-be trigger is logged like a pause, so the history
+    // shows what Protect mode would have done.
+    connect(killSwitch, &KillSwitchManager::auditTriggered, threatLogger, [threatLogger](const ThreatInfo &threat) {
+        ThreatInfo auditInfo = threat;
+        auditInfo.description = QStringLiteral("AUDIT (would have paused sync): %1").arg(threat.description);
+        threatLogger->logThreat(auditInfo, QStringLiteral("audit_would_pause"));
+    });
+
     connect(killSwitch, &KillSwitchManager::syncPaused, threatLogger, [threatLogger](const QString &reason) {
         // Log the pause action with an artificial threat entry
         ThreatInfo pauseInfo;
@@ -592,6 +600,8 @@ void Application::setupAccountsAndFolders()
     {
         auto settings = ConfigFile::settingsWithGroup(QStringLiteral("KillSwitch"));
         killSwitch->setEnabled(settings->value(QStringLiteral("enabled"), true).toBool());
+        killSwitch->setMode(KillSwitchManager::modeFromString(
+            settings->value(QStringLiteral("mode"), QStringLiteral("protect")).toString()));
         killSwitch->setDeleteThreshold(settings->value(QStringLiteral("deleteThreshold"), 10).toInt(),
                                        settings->value(QStringLiteral("timeWindow"), 60).toInt());
         killSwitch->setEntropyThreshold(settings->value(QStringLiteral("entropyThreshold"), 7.5).toDouble());

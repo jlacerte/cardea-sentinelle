@@ -85,6 +85,70 @@ ThreatLevel KillSwitchManager::currentThreatLevel() const
     return m_threatLevel;
 }
 
+KillSwitchMode KillSwitchManager::mode() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_mode;
+}
+
+void KillSwitchManager::setMode(KillSwitchMode mode)
+{
+    QMutexLocker locker(&m_mutex);
+    if (m_mode == mode) {
+        return;
+    }
+    m_mode = mode;
+
+    // Deliberately nothing else: switching back to Protect must not trip the
+    // switch for a would-be trigger that was recorded in Audit mode, and
+    // switching to Audit while triggered keeps the sync paused until the
+    // user has looked at the alert and reset.
+    if (mode == KillSwitchMode::Audit) {
+        qCWarning(lcKillSwitch) << "Kill Switch switched to AUDIT mode: threats are logged, sync is never paused";
+        if (m_triggered) {
+            qCWarning(lcKillSwitch) << "Kill Switch is currently triggered; it stays triggered until reset";
+        }
+    } else {
+        qCInfo(lcKillSwitch) << "Kill Switch switched to PROTECT mode";
+    }
+    emit modeChanged(mode);
+}
+
+int KillSwitchManager::auditTriggerCount() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_auditTriggerCount;
+}
+
+QVector<ThreatInfo> KillSwitchManager::auditTriggers() const
+{
+    QMutexLocker locker(&m_mutex);
+    return m_auditTriggers;
+}
+
+void KillSwitchManager::clearAuditTriggers()
+{
+    QMutexLocker locker(&m_mutex);
+    if (m_auditTriggerCount == 0 && m_auditTriggers.isEmpty()) {
+        return;
+    }
+    qCInfo(lcKillSwitch) << "Cleared" << m_auditTriggerCount << "audit would-be trigger(s)";
+    m_auditTriggers.clear();
+    m_auditTriggerCount = 0;
+}
+
+QString KillSwitchManager::modeToString(KillSwitchMode mode)
+{
+    return mode == KillSwitchMode::Audit ? QStringLiteral("audit") : QStringLiteral("protect");
+}
+
+KillSwitchMode KillSwitchManager::modeFromString(const QString &value)
+{
+    return value.trimmed().compare(QStringLiteral("audit"), Qt::CaseInsensitive) == 0
+        ? KillSwitchMode::Audit
+        : KillSwitchMode::Protect;
+}
+
 void KillSwitchManager::registerDetector(std::shared_ptr<ThreatDetector> detector)
 {
     if (!detector) {
@@ -178,7 +242,11 @@ bool KillSwitchManager::analyzeItem(const SyncFileItem &item, const AnalysisCont
     // Trigger on highest threat if High or Critical
     if (highestThreat.level >= ThreatLevel::High) {
         trigger(highestThreat);
-        return true; // Block this item
+        if (m_mode == KillSwitchMode::Protect) {
+            return true; // Block this item
+        }
+        // Audit mode: trigger() only recorded the would-be trigger. Nothing
+        // is blocked; fall through so the threat level keeps being updated.
     }
 
     evaluateThreatLevel();
@@ -202,7 +270,11 @@ bool KillSwitchManager::analyzeBatch(const QVector<SyncFileItem> &items, const A
     // Immediate trigger on massive batch deletion
     if (deleteCount > m_deleteThreshold * 2) {
         trigger(QStringLiteral("Massive batch deletion detected: %1 files").arg(deleteCount));
-        return true;
+        if (mode() == KillSwitchMode::Protect) {
+            return true;
+        }
+        // Audit mode: recorded only, still run the per-item detectors so
+        // their findings are logged as usual.
     }
 
     // Analyze each item
@@ -233,6 +305,18 @@ void KillSwitchManager::trigger(const ThreatInfo &threat)
         return; // Already triggered
     }
 
+    ThreatInfo triggerInfo = threat;
+    triggerInfo.level = ThreatLevel::Critical;
+    if (!triggerInfo.timestamp.isValid()) {
+        triggerInfo.timestamp = QDateTime::currentDateTime();
+    }
+
+    if (m_mode == KillSwitchMode::Audit) {
+        // Detect and tell, but never pause: record what would have happened.
+        recordAuditTrigger(triggerInfo);
+        return;
+    }
+
     m_triggered = true;
     m_threatLevel = ThreatLevel::Critical;
 
@@ -240,12 +324,6 @@ void KillSwitchManager::trigger(const ThreatInfo &threat)
     qCCritical(lcKillSwitch) << "Reason:" << threat.description
                              << "- Detector:" << threat.detectorName
                              << "- Files:" << threat.affectedFiles.size();
-
-    ThreatInfo triggerInfo = threat;
-    triggerInfo.level = ThreatLevel::Critical;
-    if (!triggerInfo.timestamp.isValid()) {
-        triggerInfo.timestamp = QDateTime::currentDateTime();
-    }
 
     // Execute all registered actions
     executeActions(triggerInfo);
@@ -398,6 +476,23 @@ void KillSwitchManager::executeActions(const ThreatInfo &threat)
         qCInfo(lcKillSwitch) << "Executing action:" << action->name();
         action->execute(threat);
     }
+}
+
+void KillSwitchManager::recordAuditTrigger(const ThreatInfo &threat)
+{
+    // Caller holds m_mutex.
+    if (m_auditTriggers.size() >= MaxAuditTriggers) {
+        m_auditTriggers.removeFirst(); // Keep the most recent ones
+    }
+    m_auditTriggers.append(threat);
+    ++m_auditTriggerCount;
+
+    qCWarning(lcKillSwitch) << "AUDIT: would have triggered the Kill Switch (#" << m_auditTriggerCount << ")"
+                            << "- Reason:" << threat.description
+                            << "- Detector:" << threat.detectorName
+                            << "- Files:" << threat.affectedFiles.size();
+
+    emit auditTriggered(threat);
 }
 
 void KillSwitchManager::recordEvent(const QString &eventType, const QString &path)

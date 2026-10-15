@@ -34,6 +34,11 @@ class KillSwitchAlertDialog;
  * - folders added while the kill switch is triggered are paused as well.
  * - on KillSwitchManager::syncResumed() only the folders paused by this
  *   controller are resumed; folders the user paused stay paused.
+ * - on KillSwitchManager::auditTriggered() (Audit mode, see KillSwitchMode)
+ *   the controller deliberately does nothing but log: audit mode exists to
+ *   calibrate thresholds on real users without nagging them, so no folder
+ *   is paused and no dialog is raised. The would-be trigger counter on the
+ *   Kill Switch settings page and the log are the user-facing side of it.
  */
 class SentinelController : public QObject
 {
