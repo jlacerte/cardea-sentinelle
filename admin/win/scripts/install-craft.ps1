@@ -186,6 +186,18 @@ function Step-Prerequisites {
     }
     Write-Step "Visual Studio: $vsPath"
 
+    # Craft runs "vcvarsall.bat amd64 > NUL && python dumpenv.py" and parses
+    # the combined stdout+stderr as JSON. vcvarsall.bat calls vswhere.exe by
+    # name; when the VS Installer folder is not in PATH (machines with several
+    # VS editions, non-English Windows), cmd prints "'vswhere.exe' is not
+    # recognized..." on stderr, which lands in front of the JSON and makes
+    # Craft fail with JSONDecodeError. Put the folder first, for this process.
+    $vsInstallerDir = Split-Path -Parent $vswhere
+    if ($env:PATH -notlike "*$vsInstallerDir*") {
+        $env:PATH = "$vsInstallerDir;$env:PATH"
+        Write-Step "Added to PATH for Craft: $vsInstallerDir (vswhere.exe)"
+    }
+
     $drive = Split-Path $Script:CraftRoot -Qualifier      # e.g. "C:"
     $disk = Get-PSDrive -Name $drive.TrimEnd(':') -ErrorAction SilentlyContinue
     if ($disk) {
