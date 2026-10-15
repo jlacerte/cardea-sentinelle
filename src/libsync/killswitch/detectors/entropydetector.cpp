@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iterator>
 
 namespace OCC {
 
@@ -210,19 +211,23 @@ void EntropyDetector::updateCache(const QString &filePath, double entropy) const
         return;
     }
 
-    // Remove from current position if exists
-    int existingIndex = m_cacheOrder.indexOf(filePath);
-    if (existingIndex >= 0) {
-        m_cacheOrder.removeAt(existingIndex);
+    // Touch: move an existing node to the back (most recently used), or
+    // append a new one. Both are O(1): the hash lookup finds the node and
+    // std::list::splice relinks it without copying.
+    auto pos = m_cachePositions.find(filePath);
+    if (pos != m_cachePositions.end()) {
+        m_cacheOrder.splice(m_cacheOrder.end(), m_cacheOrder, pos.value());
+    } else {
+        m_cacheOrder.push_back(filePath);
+        m_cachePositions.insert(filePath, std::prev(m_cacheOrder.end()));
     }
-
-    // Add to end (most recently used)
-    m_cacheOrder.append(filePath);
     m_entropyCache[filePath] = entropy;
 
-    // Evict oldest if over limit
-    while (m_cacheOrder.size() > m_cacheMaxSize && !m_cacheOrder.isEmpty()) {
-        QString oldest = m_cacheOrder.takeFirst();
+    // Evict least recently used entries from the front while over the limit
+    while (static_cast<int>(m_cachePositions.size()) > m_cacheMaxSize && !m_cacheOrder.empty()) {
+        const QString oldest = m_cacheOrder.front();
+        m_cacheOrder.pop_front();
+        m_cachePositions.remove(oldest);
         m_entropyCache.remove(oldest);
     }
 }

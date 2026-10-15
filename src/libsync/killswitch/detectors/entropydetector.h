@@ -12,6 +12,8 @@
 #include <QHash>
 #include <QVector>
 
+#include <list>
+
 namespace OCC {
 
 /**
@@ -68,7 +70,12 @@ public:
     void setMaxCacheSize(int size) { m_cacheMaxSize = size; }
     int maxCacheSize() const { return m_cacheMaxSize; }
     int cacheSize() const { return m_entropyCache.size(); }
-    void clearCache() { m_entropyCache.clear(); m_cacheOrder.clear(); }
+    void clearCache()
+    {
+        m_entropyCache.clear();
+        m_cachePositions.clear();
+        m_cacheOrder.clear();
+    }
 
     /**
      * @brief Calculate Shannon entropy of data
@@ -137,15 +144,19 @@ private:
     int m_threshold = 3;                // High-entropy hits in window for High
     int m_windowSeconds = 60;           // Window for counting hits
 
-    // Cache of known file entropies for comparison (with LRU eviction)
+    // Cache of known file entropies for comparison (with LRU eviction).
+    // m_cacheOrder lists the keys least-recently-used first; m_cachePositions
+    // maps each key to its node so a touch is an O(1) splice instead of an
+    // O(n) QStringList::indexOf/removeAt.
     mutable QHash<QString, double> m_entropyCache;
-    mutable QStringList m_cacheOrder; // For LRU eviction
+    mutable std::list<QString> m_cacheOrder;
+    mutable QHash<QString, std::list<QString>::iterator> m_cachePositions;
 
     // Timestamps of recent high-entropy hits (pruned to the window)
     QVector<QDateTime> m_recentHits;
 
     /**
-     * @brief Update cache with LRU eviction
+     * @brief Update cache with O(1) LRU eviction
      */
     void updateCache(const QString &filePath, double entropy) const;
 
