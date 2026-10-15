@@ -255,6 +255,10 @@ détection des changements locaux) :
 - une notification apparaît dans la barre des tâches ;
 - **Paramètres > Kill Switch** affiche « TRIGGERED - Sync Paused » et l'historique.
 
+Résultat mesuré sur un vrai serveur (mode `header`, 10 fichiers) : déclenchement
+0,6 s après le début de la synchronisation, **aucun** des 10 fichiers chiffrés
+envoyé.
+
 Test supplémentaire utile : fermez `nextclouddev.exe` pendant qu'il est
 déclenché, relancez-le avec `-Run`. Il doit redémarrer **toujours en pause**,
 avec le dialogue, et non reprendre l'envoi.
@@ -265,16 +269,25 @@ un ou deux premiers selon le mode).
 
 ### 6.3 Revenir à l'état initial
 
-1. Dans le client : bouton **Reset** du dialogue, ou **Paramètres > Kill Switch > Reset**.
-   La synchronisation reprend.
-2. Restaurez les fichiers :
+L'ordre compte. **Reset relance la synchronisation** : si les fichiers chiffrés
+sont encore sur le disque, elle les revoit et le Kill Switch redéclenche dans
+la seconde (le dialogue le dit : « Triggered again N seconds after the last
+reset »). C'est le comportement voulu, rien n'est envoyé entre-temps, mais ça
+ressemble à un bug si on ne s'y attend pas.
+
+1. Restaurez d'abord les fichiers du bac à sable :
 
 ```powershell
 .\admin\win\scripts\test-sentinel.ps1 -Simulate -Mode reset -Sandbox "D:\TestNextcloud\sentinel-sandbox"
 ```
 
-Le client resynchronise les fichiers restaurés. Vous pouvez enchaîner un autre
-mode.
+2. Ensuite seulement, dans le client : bouton **Reset** du dialogue, ou
+   **Paramètres > Kill Switch > Reset**. La synchronisation reprend et revoit des
+   fichiers sains.
+
+Dans la vraie vie, l'étape 1 est « restaurer depuis le serveur » (interface
+web, Versions ou Fichiers supprimés) ou supprimer les fichiers chiffrés.
+Vous pouvez ensuite enchaîner un autre mode.
 
 Équivalent manuel du simulateur :
 
@@ -324,7 +337,7 @@ les lignes en rouge, suffisent pour diagnostiquer à distance.
 | `The prefix is incomplete` (install-craft -Verify) | installation Craft interrompue | relancer `install-craft.ps1`, il reprend |
 | erreurs de liaison Qt, ou DLL incompatible au lancement | deux Qt mélangés (C:\Qt et Craft) | `-Clean`, ne garder que Craft, vérifier qu'aucun `C:\Qt\...\bin` n'est dans le `PATH` |
 | `nextclouddev.exe is running` au build | client de test ouvert | le quitter via l'icône de la barre des tâches |
-| `nextclouddev.exe exited immediately` | DLL manquante | lancer l'exe depuis une console pour lire le message ; vérifier `C:\Qt\...\bin` et `CraftRoot\bin` |
+| `nextclouddev.exe exited within 10 s` | DLL manquante, ou ressources Qt WebEngine introuvables (`%TEMP%\NextcloudDev-crash.log`) | lancer via `-Run` (qui règle `QTWEBENGINE_*` pour Craft) ; sinon lire le crash log affiché par le script |
 | `No test matched` | build configuré sans tests | relancer `-Build` (le script active `BUILD_TESTING`) |
 | `REFUSED: ... sentinel-sandbox` | mauvais chemin passé au simulateur | le dossier doit s'appeler `sentinel-sandbox` |
 | Le client ne détecte rien | fichiers pas encore synchronisés avant l'attaque, ou Kill Switch désactivé | attendre l'icône verte après `seed` ; vérifier Paramètres > Kill Switch |

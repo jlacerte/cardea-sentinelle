@@ -9,6 +9,7 @@
 
 #include "folder.h"
 
+#include <QDateTime>
 #include <QObject>
 #include <QPointer>
 #include <QSet>
@@ -70,6 +71,7 @@ private:
     QPointer<KillSwitchManager> _manager;
     QPointer<KillSwitchAlertDialog> _alertDialog;
     QSet<QString> _pausedByController;
+    QDateTime _lastReset;
 };
 
 } // namespace OCC

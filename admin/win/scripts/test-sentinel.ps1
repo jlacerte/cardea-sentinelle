@@ -203,6 +203,17 @@ function Set-RuntimePath {
         $parts += "$craft\bin"
         $env:Qt6_DIR = "$craft\lib\cmake\Qt6"
         Write-Step "Runtime PATH: Craft prefix $craft (Qt from Craft)"
+
+        # Qt WebEngine (login wizard) looks for its resources next to the Qt
+        # libraries in a layout Craft does not use: Craft puts the .pak files
+        # and QtWebEngineProcess.exe in bin\ and the locales under
+        # translations\. Without these the client aborts as soon as the login
+        # wizard opens (issue #24).
+        if (Test-Path "$craft\bin\qtwebengine_resources.pak") { $env:QTWEBENGINE_RESOURCES_PATH = "$craft\bin" }
+        if (Test-Path "$craft\translations\qtwebengine_locales") { $env:QTWEBENGINE_LOCALES_PATH = "$craft\translations\qtwebengine_locales" }
+        if (Test-Path "$craft\bin\QtWebEngineProcess.exe") { $env:QTWEBENGINEPROCESS_PATH = "$craft\bin\QtWebEngineProcess.exe" }
+        if ($env:QTWEBENGINE_RESOURCES_PATH) { Write-Step "Qt WebEngine resources: $env:QTWEBENGINE_RESOURCES_PATH" }
+        else { Write-Warn "qtwebengine_resources.pak not found under $craft\bin; the login wizard may abort" }
     } else {
         $qt = Find-QtPath
         if (-not $qt) {
@@ -421,10 +432,23 @@ function Step-Run {
     }
 
     Set-RuntimePath
+    $crashLog = Join-Path $env:TEMP "NextcloudDev-crash.log"
+    $startedAt = Get-Date
     Start-Process -FilePath $Script:ExePath -WorkingDirectory (Split-Path $Script:ExePath)
-    Start-Sleep -Seconds 3
-    if (-not (Get-Process -Name "nextclouddev" -ErrorAction SilentlyContinue)) {
-        throw "nextclouddev.exe exited immediately. Usually a missing or mismatched DLL: run it from a console to see the message, and make sure the build and this script use the same Craft prefix (install-craft.ps1 -Verify)."
+
+    # The client can die a few seconds after start (e.g. when the login wizard
+    # opens): watch it for a while and read the crash log it leaves behind.
+    $alive = $true
+    for ($i = 0; $i -lt 10; $i++) {
+        Start-Sleep -Seconds 1
+        if (-not (Get-Process -Name "nextclouddev" -ErrorAction SilentlyContinue)) { $alive = $false; break }
+    }
+    if (-not $alive) {
+        $details = ""
+        if ((Test-Path $crashLog) -and ((Get-Item $crashLog).LastWriteTime -gt $startedAt)) {
+            $details = "`n    Last lines of ${crashLog}:`n    " + ((Get-Content $crashLog -Tail 15) -join "`n    ")
+        }
+        throw "nextclouddev.exe exited within 10 s. Usually a missing or mismatched DLL, or Qt WebEngine resources not found: run it from a console to see the message, and make sure the build and this script use the same Craft prefix (install-craft.ps1 -Verify).$details"
     }
     Write-Step "nextclouddev.exe is running (look for the tray icon)"
     Write-Info "First start: add ONLY your TEST account, with your TEST folder as the sync folder."

@@ -85,6 +85,7 @@ void SentinelController::slotSyncResumed()
 {
     qCInfo(lcSentinelController) << "Kill Switch reset, resuming" << _pausedByController.size() << "folder(s)";
 
+    _lastReset = QDateTime::currentDateTime();
     closeAlertDialog();
     clearPersistedState();
 
@@ -199,9 +200,24 @@ void SentinelController::showAlertDialog(const QString &reason)
         return;
     }
 
+    // Resetting restarts the sync, which sees the very same files again and
+    // trips the switch again within seconds. That is the right behaviour, but
+    // it looks like a bug unless the dialog says what is going on.
+    QString displayReason = reason;
+    if (_lastReset.isValid()) {
+        const qint64 secondsSinceReset = _lastReset.secsTo(QDateTime::currentDateTime());
+        if (secondsSinceReset >= 0 && secondsSinceReset < 300) {
+            displayReason = tr("Triggered again %n second(s) after the last reset. "
+                               "The files listed below are still on disk: restore them from the server "
+                               "(or delete them) before resetting again.\n\n%1",
+                               "", static_cast<int>(secondsSinceReset))
+                                .arg(reason);
+        }
+    }
+
     // Parent-less and heap allocated on purpose: the caller must not block,
     // and the dialog has to outlive whatever raised it.
-    auto *dialog = new KillSwitchAlertDialog(reason, _manager->threats());
+    auto *dialog = new KillSwitchAlertDialog(displayReason, _manager->threats());
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     _alertDialog = dialog;
 
