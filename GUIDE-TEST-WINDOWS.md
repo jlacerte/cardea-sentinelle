@@ -182,7 +182,7 @@ et `%USERPROFILE%\CraftRoot\bin` dans le `PATH`) :
 
 ```powershell
 cd build-windows-Release-dev
-ctest -R "KillSwitch|FormatSignature" --output-on-failure -C Release
+ctest -R "KillSwitch|FormatSignature|ThreatLogger" --output-on-failure -C Release
 ```
 
 ---

@@ -1,5 +1,54 @@
 # Nextcloud Sentinel Edition - Development Journal
 
+## 2026-10-15 (soir) - Premier test réel, issues, et quatre chantiers par sous-agents
+
+### Validation sur le poste Windows (issue #24)
+
+Première compilation complète du client (GUI comprise) sur un poste Windows
+avec Qt fourni par KDE Craft, 192 tests verts, puis **premier test de bout en
+bout sur un vrai serveur** : attaque `header` (10 fichiers, 4 premiers Ko
+réécrits), déclenchement 0,6 s après le début de la synchronisation, aucun
+fichier chiffré envoyé. Corrigés au passage : installation de Craft
+(`install-craft.ps1`, recette de la CI), un seul Qt (celui de Craft),
+`vswhere.exe` dans le `PATH`, Inkscape en prérequis, ressources QtWebEngine
+pour `-Run`, sortie des tests capturée dans des fichiers, texte du dialogue
+quand le Reset redéclenche. Le workflow CI Windows n'était pas un YAML
+valide depuis l'origine (étape mal indentée) : corrigé, et les deux
+workflows tournent maintenant sur toutes les branches (#19).
+
+### Étude des améliorations : issues #7 à #23
+
+Seize issues détaillées plus une feuille de route (#23), classées en quatre
+priorités. Celles qui demandent une décision produit (#11 liste blanche,
+#12 seuils, #13 direction serveur, #14 sauvegarde, #18 identité) attendent
+le propriétaire.
+
+### Livré par quatre sous-agents (fichiers disjoints, relus et testés)
+
+- **#7 / #8** : `FormatSignatureDetector` échantillonne jusqu'à 16 fenêtres
+  de 4 Ko (offset 0, fin, toutes les 512 Kio) et valide la structure du
+  format dedans : grammaire des marqueurs JPEG, en-têtes locaux ZIP depuis
+  le répertoire central, objets PDF depuis la table xref, chaîne d'atomes
+  MP4, chaîne de trames MP3. Un corps corrompu compte comme une queue
+  corrompue (Medium seul, High à 3). Les sondes « bloc du milieu » et
+  « queue seule jpg/mp4 » des scénarios sont devenues des tests assertifs.
+  Limites documentées : formats sans structure interne bon marché, bloc à
+  l'intérieur d'un seul `mdat` ou d'un gros flux image PDF. **Corpus de
+  vrais fichiers encore nécessaire (#21) avant de faire confiance à ces
+  contrôles sur des données utilisateur.**
+- **#15 mode audit** : détecte, journalise et compte les « aurait
+  déclenché » sans jamais mettre en pause ; sélecteur dans les réglages,
+  persistant. C'est le mode à utiliser sur de vrais utilisateurs pendant la
+  calibration.
+- **#16 modèle de menace** : `docs/THREAT-MODEL.md`, avec le tableau des
+  contournements d'un attaquant qui connaît Sentinel.
+- **#20 (partie)** : journal des menaces en JSON Lines avec rotation
+  (2 000 entrées : 11 s → 0,1 s), cache LRU d'entropie en O(1).
+
+Tests : 137 + 50 + 26 + 13 = 226.
+
+---
+
 ## 2026-10-15 (PM) - Chiffrement en place : recherche, plan et implémentation par sous-agents
 
 ### Recherche (deux agents, sources citées dans les rapports)

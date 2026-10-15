@@ -30,7 +30,7 @@ We're building something new: a Nextcloud sync client that fights back against r
 | Core Kill Switch engine | ✅ Complete |
 | Threat detectors (5 types) | ✅ Complete |
 | Desktop UI (Settings + Alerts) | ✅ Complete |
-| Test suite (192 tests, incl. end-to-end attack scenarios) | ✅ Complete |
+| Test suite (226 tests, incl. end-to-end attack scenarios) | ✅ Complete |
 | Windows build pipeline | ✅ Complete |
 | Linux build pipeline | ✅ Complete |
 | Android client | ⏳ Planned |
@@ -122,6 +122,8 @@ Measured by `test/testkillswitchscenarios.cpp` with the five detectors and defau
 | In-place header-only (first 4 KB, LockBit 2/3 style) | Paused on the 1st file |
 | Alternating 1 MB chunks, first chunk hit (Play style) | Paused on the 1st file |
 | Tail-only encryption, header intact | Paused after 2 files |
+| Middle-chunk encryption, header and tail intact (docx, pdf, mp4, jpg, mp3) | Paused by the 3rd file |
+| Tail-only damage on .jpg / .mp4 (no trailer) | Paused by the 3rd file |
 | Delete + recreate as `.locked` | Paused on the 1st file |
 | Ransom note dropped | Paused immediately |
 | Canary file touched | Paused immediately |
@@ -129,7 +131,7 @@ Measured by `test/testkillswitchscenarios.cpp` with the five detectors and defau
 
 Benign workloads in the same suite (25 new photos, creating archives, editing text, saving a KeePass database, deleting a few files, legitimate renames, Nextcloud conflict copies, a new `README.txt`) never trip the switch.
 
-**Known gaps:** chunked encryption that spares both the header and the structural tail of a file (e.g. only the middle megabyte), and tail-only damage on formats without a trailer (`.jpg`, `.mp4`), are not detected per file yet. Chunk-level sampling is the next step.
+**Known limits:** formats without cheap internal structure (gif, webp, tiff, OLE2 `.doc`/`.xls`, gz, 7z) only get the signature check; a chunk inside a single `mdat` atom of a phone video, or inside one large PDF image stream, is not detectable without decompressing. The body checks were validated on synthetic files; a corpus of real-world documents is still needed before trusting them on user data (see the roadmap issue). **Audit mode** (Settings > Kill Switch) logs every would-be trigger without ever pausing, for calibration on real users.
 
 ### Threat Dashboard
 
@@ -236,13 +238,14 @@ One `KillSwitchManager` per process: every sync folder feeds the same event stre
 
 ```bash
 # Run all Kill Switch tests (unit, format signatures, end-to-end scenarios)
-cd build && ctest -R "KillSwitch|FormatSignature" --output-on-failure
+cd build && ctest -R "KillSwitch|FormatSignature|ThreatLogger" --output-on-failure
 ```
 
-**Test coverage:** 192 tests in three suites:
-- `KillSwitchTest` (128): manager, each detector, false positives (README.txt, password databases, small deletion bursts), edge cases, renames, thread safety, real encrypted sample files (`test/data/encrypted/`)
-- `FormatSignatureDetectorTest` (38): synthetic PNG/ZIP/PDF/JPEG/MP3/text files, chunked and tail-only corruption, decoys
+**Test coverage:** 226 tests in four suites:
+- `KillSwitchTest` (137): manager, audit mode, each detector, false positives (README.txt, password databases, small deletion bursts), edge cases, renames, thread safety, real encrypted sample files (`test/data/encrypted/`)
+- `FormatSignatureDetectorTest` (50): synthetic PNG/ZIP/PDF/JPEG/MP4/MP3/text files, header, tail, middle-chunk and tail-only corruption, decoys, motion photos, append-only ZIP updates
 - `KillSwitchScenariosTest` (26): full attack simulations and benign workloads against a sandbox of realistic files
+- `ThreatLoggerTest` (13): JSON Lines log, rotation, migration, CSV export
 
 On Windows, [GUIDE-TEST-WINDOWS.md](GUIDE-TEST-WINDOWS.md) walks through the whole loop (update, build, test, run, simulate) with `admin\win\scripts\test-sentinel.ps1`.
 

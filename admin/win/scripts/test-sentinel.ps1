@@ -49,7 +49,7 @@ param(
     [int]$Count = 0,
 
     # -Test only: ctest regex (default: the three Kill Switch suites)
-    [string]$TestFilter = "KillSwitch|FormatSignature",
+    [string]$TestFilter = "KillSwitch|FormatSignature|ThreatLogger",
 
     [string]$QtPath = ""
 )
