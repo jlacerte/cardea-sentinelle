@@ -8,8 +8,11 @@
 #include "threatlogger.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
-#include <QJsonObject>
+#include <QJsonParseError>
 #include <QStandardPaths>
 #include <QTextStream>
 #include <QLoggingCategory>
@@ -29,8 +32,11 @@ ThreatLogger::ThreatLogger(QObject *parent)
     if (!dir.exists()) {
         dir.mkpath(dataPath);
     }
-    m_logFilePath = dir.filePath(QStringLiteral("sentinel-threats.json"));
+    m_logFilePath = dir.filePath(QStringLiteral("sentinel-threats.jsonl"));
+    m_rotatedLogFilePath = dir.filePath(QStringLiteral("sentinel-threats.1.jsonl"));
+    m_legacyLogFilePath = dir.filePath(QStringLiteral("sentinel-threats.json"));
 
+    migrateLegacyLog();
     ensureLogFileExists();
 
     s_instance = this;
@@ -49,18 +55,59 @@ ThreatLogger *ThreatLogger::instance()
     return s_instance;
 }
 
+void ThreatLogger::setRotationSizeBytes(qint64 bytes)
+{
+    m_rotationSizeBytes = qMax<qint64>(1, bytes);
+}
+
 void ThreatLogger::ensureLogFileExists()
 {
     QFile file(m_logFilePath);
     if (!file.exists()) {
-        if (file.open(QIODevice::WriteOnly)) {
-            QJsonObject root;
-            root[QStringLiteral("version")] = 1;
-            root[QStringLiteral("threats")] = QJsonArray();
-            file.write(QJsonDocument(root).toJson());
-            file.close();
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+            qCWarning(lcThreatLogger) << "Could not create log file:" << m_logFilePath << file.errorString();
         }
     }
+}
+
+void ThreatLogger::migrateLegacyLog()
+{
+    QFile legacy(m_legacyLogFilePath);
+    if (!legacy.exists()) {
+        return;
+    }
+    if (!legacy.open(QIODevice::ReadOnly)) {
+        qCWarning(lcThreatLogger) << "Could not open legacy log for migration:" << m_legacyLogFilePath
+                                  << legacy.errorString();
+        return;
+    }
+
+    QJsonParseError parseError{};
+    const QJsonDocument doc = QJsonDocument::fromJson(legacy.readAll(), &parseError);
+    legacy.close();
+
+    int migrated = 0;
+    if (doc.isObject()) {
+        const QJsonArray threats = doc.object().value(QStringLiteral("threats")).toArray();
+        for (const QJsonValue &val : threats) {
+            if (!val.isObject()) {
+                continue;
+            }
+            if (appendLine(QJsonDocument(val.toObject()).toJson(QJsonDocument::Compact))) {
+                ++migrated;
+            }
+        }
+    } else {
+        qCWarning(lcThreatLogger) << "Legacy log is not a JSON object, nothing migrated:"
+                                  << parseError.errorString();
+    }
+
+    const QString migratedPath = m_legacyLogFilePath + QStringLiteral(".migrated");
+    QFile::remove(migratedPath);
+    if (!QFile::rename(m_legacyLogFilePath, migratedPath)) {
+        qCWarning(lcThreatLogger) << "Could not rename legacy log to" << migratedPath;
+    }
+    qCInfo(lcThreatLogger) << "Migrated" << migrated << "entries from legacy log" << m_legacyLogFilePath;
 }
 
 QString ThreatLogger::threatLevelToString(ThreatLevel level) const
@@ -80,46 +127,27 @@ QString ThreatLogger::threatLevelToString(ThreatLevel level) const
     return QStringLiteral("Unknown");
 }
 
-QJsonArray ThreatLogger::readLogEntries() const
+ThreatLevel ThreatLogger::threatLevelFromString(const QString &level)
 {
-    QFile file(m_logFilePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        qCWarning(lcThreatLogger) << "Could not open log file for reading:" << m_logFilePath;
-        return QJsonArray();
+    if (level == QStringLiteral("Critical")) {
+        return ThreatLevel::Critical;
     }
-
-    QJsonDocument doc = QJsonDocument::fromJson(file.readAll());
-    file.close();
-
-    if (!doc.isObject()) {
-        return QJsonArray();
+    if (level == QStringLiteral("High")) {
+        return ThreatLevel::High;
     }
-
-    return doc.object()[QStringLiteral("threats")].toArray();
+    if (level == QStringLiteral("Medium")) {
+        return ThreatLevel::Medium;
+    }
+    if (level == QStringLiteral("Low")) {
+        return ThreatLevel::Low;
+    }
+    return ThreatLevel::None;
 }
 
-void ThreatLogger::writeLogEntries(const QJsonArray &entries)
+QJsonObject ThreatLogger::entryFromThreat(const ThreatInfo &threat, const QString &actionTaken) const
 {
-    QFile file(m_logFilePath);
-    if (!file.open(QIODevice::WriteOnly)) {
-        qCWarning(lcThreatLogger) << "Could not open log file for writing:" << m_logFilePath;
-        return;
-    }
-
-    QJsonObject root;
-    root[QStringLiteral("version")] = 1;
-    root[QStringLiteral("threats")] = entries;
-
-    file.write(QJsonDocument(root).toJson());
-    file.close();
-}
-
-void ThreatLogger::logThreat(const ThreatInfo &threat, const QString &actionTaken)
-{
-    QJsonArray entries = readLogEntries();
-
     QJsonObject entry;
-    entry[QStringLiteral("timestamp")] = threat.timestamp.toString(Qt::ISODate);
+    entry[QStringLiteral("timestamp")] = threat.timestamp.toString(Qt::ISODateWithMs);
     entry[QStringLiteral("level")] = threatLevelToString(threat.level);
     entry[QStringLiteral("detector")] = threat.detectorName;
     entry[QStringLiteral("description")] = threat.description;
@@ -133,9 +161,83 @@ void ThreatLogger::logThreat(const ThreatInfo &threat, const QString &actionTake
     if (!actionTaken.isEmpty()) {
         entry[QStringLiteral("action_taken")] = actionTaken;
     }
+    return entry;
+}
 
-    entries.append(entry);
-    writeLogEntries(entries);
+bool ThreatLogger::threatFromEntry(const QJsonObject &entry, ThreatInfo &threat)
+{
+    if (!entry.contains(QStringLiteral("timestamp")) || !entry.contains(QStringLiteral("level"))) {
+        return false;
+    }
+    threat.timestamp = QDateTime::fromString(entry.value(QStringLiteral("timestamp")).toString(), Qt::ISODateWithMs);
+    threat.level = threatLevelFromString(entry.value(QStringLiteral("level")).toString());
+    threat.detectorName = entry.value(QStringLiteral("detector")).toString();
+    threat.description = entry.value(QStringLiteral("description")).toString();
+
+    threat.affectedFiles.clear();
+    const QJsonArray files = entry.value(QStringLiteral("files")).toArray();
+    for (const QJsonValue &f : files) {
+        threat.affectedFiles.append(f.toString());
+    }
+    return true;
+}
+
+void ThreatLogger::rotateIfNeeded()
+{
+    const QFileInfo info(m_logFilePath);
+    if (!info.exists() || info.size() < m_rotationSizeBytes) {
+        return;
+    }
+
+    QFile::remove(m_rotatedLogFilePath);
+    if (!QFile::rename(m_logFilePath, m_rotatedLogFilePath)) {
+        qCWarning(lcThreatLogger) << "Could not rotate log file" << m_logFilePath << "to" << m_rotatedLogFilePath;
+        return;
+    }
+    qCInfo(lcThreatLogger) << "Rotated threat log (" << info.size() << "bytes) to" << m_rotatedLogFilePath;
+}
+
+bool ThreatLogger::appendLine(const QByteArray &line)
+{
+    // A crash or a short write can leave the last line without its '\n'.
+    // Close it first, or the new entry is glued to it and both are lost as
+    // one malformed line. The empty line this may leave is skipped on load.
+    // Every line this logger writes ends with '\n', so the file is read once,
+    // not on every append (reading it each time is slow on Windows).
+    QByteArray data;
+    if (!m_tailChecked) {
+        QFile existing(m_logFilePath);
+        char last = '\n';
+        if (existing.size() > 0 && existing.open(QIODevice::ReadOnly)
+            && existing.seek(existing.size() - 1) && existing.getChar(&last) && last != '\n') {
+            data.append('\n');
+        }
+        m_tailChecked = true;
+    }
+    data.append(line);
+    data.append('\n');
+
+    QFile file(m_logFilePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        qCWarning(lcThreatLogger) << "Could not open log file for appending:" << m_logFilePath << file.errorString();
+        m_tailChecked = false;
+        return false;
+    }
+
+    const bool ok = file.write(data) == data.size();
+    file.flush();
+    file.close();
+    if (!ok) {
+        qCWarning(lcThreatLogger) << "Short write to log file:" << m_logFilePath << file.errorString();
+        m_tailChecked = false;
+    }
+    return ok;
+}
+
+void ThreatLogger::logThreat(const ThreatInfo &threat, const QString &actionTaken)
+{
+    rotateIfNeeded();
+    appendLine(QJsonDocument(entryFromThreat(threat, actionTaken)).toJson(QJsonDocument::Compact));
 
     qCInfo(lcThreatLogger) << "Logged threat:" << threat.description
                            << "Level:" << threatLevelToString(threat.level)
@@ -147,39 +249,78 @@ QString ThreatLogger::logFilePath() const
     return m_logFilePath;
 }
 
+QString ThreatLogger::rotatedLogFilePath() const
+{
+    return m_rotatedLogFilePath;
+}
+
+QString ThreatLogger::legacyLogFilePath() const
+{
+    return m_legacyLogFilePath;
+}
+
+void ThreatLogger::forEachEntryInFile(const QString &path,
+                                      const std::function<void(const QJsonObject &)> &visitor) const
+{
+    QFile file(path);
+    if (!file.exists()) {
+        return;
+    }
+    if (!file.open(QIODevice::ReadOnly)) {
+        qCWarning(lcThreatLogger) << "Could not open log file for reading:" << path << file.errorString();
+        return;
+    }
+
+    qint64 lineNumber = 0;
+    int skipped = 0;
+    while (!file.atEnd()) {
+        ++lineNumber;
+        const QByteArray line = file.readLine().trimmed();
+        if (line.isEmpty()) {
+            continue;
+        }
+
+        QJsonParseError parseError{};
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            if (skipped < 5) {
+                const QString reason = parseError.error != QJsonParseError::NoError
+                    ? parseError.errorString()
+                    : QStringLiteral("not a JSON object");
+                qCWarning(lcThreatLogger) << "Skipping malformed log line" << lineNumber << "in" << path << ":"
+                                          << reason;
+            }
+            ++skipped;
+            continue;
+        }
+        visitor(doc.object());
+    }
+    file.close();
+
+    if (skipped > 0) {
+        qCWarning(lcThreatLogger) << "Skipped" << skipped << "malformed line(s) in" << path;
+    }
+}
+
+void ThreatLogger::forEachEntry(const std::function<void(const QJsonObject &)> &visitor) const
+{
+    forEachEntryInFile(m_rotatedLogFilePath, visitor);
+    forEachEntryInFile(m_logFilePath, visitor);
+}
+
 QVector<ThreatInfo> ThreatLogger::loadThreats() const
 {
     QVector<ThreatInfo> result;
-    QJsonArray entries = readLogEntries();
-
-    for (const QJsonValue &val : entries) {
-        QJsonObject obj = val.toObject();
+    forEachEntry([&result](const QJsonObject &entry) {
         ThreatInfo threat;
-        threat.timestamp = QDateTime::fromString(obj[QStringLiteral("timestamp")].toString(), Qt::ISODate);
-        threat.detectorName = obj[QStringLiteral("detector")].toString();
-        threat.description = obj[QStringLiteral("description")].toString();
-
-        QString levelStr = obj[QStringLiteral("level")].toString();
-        if (levelStr == QStringLiteral("Critical")) {
-            threat.level = ThreatLevel::Critical;
-        } else if (levelStr == QStringLiteral("High")) {
-            threat.level = ThreatLevel::High;
-        } else if (levelStr == QStringLiteral("Medium")) {
-            threat.level = ThreatLevel::Medium;
-        } else if (levelStr == QStringLiteral("Low")) {
-            threat.level = ThreatLevel::Low;
-        } else {
-            threat.level = ThreatLevel::None;
+        if (threatFromEntry(entry, threat)) {
+            result.append(threat);
         }
+    });
 
-        QJsonArray files = obj[QStringLiteral("files")].toArray();
-        for (const QJsonValue &f : files) {
-            threat.affectedFiles.append(f.toString());
-        }
-
-        result.append(threat);
+    if (result.size() > MAX_LOADED_ENTRIES) {
+        result.remove(0, result.size() - MAX_LOADED_ENTRIES);
     }
-
     return result;
 }
 
@@ -200,7 +341,14 @@ QVector<ThreatInfo> ThreatLogger::threatsFromLastDays(int days) const
 
 void ThreatLogger::clearLog()
 {
-    writeLogEntries(QJsonArray());
+    QFile::remove(m_rotatedLogFilePath);
+
+    QFile file(m_logFilePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        qCWarning(lcThreatLogger) << "Could not truncate log file:" << m_logFilePath << file.errorString();
+        return;
+    }
+    file.close();
     qCInfo(lcThreatLogger) << "Threat log cleared";
 }
 
@@ -215,18 +363,28 @@ bool ThreatLogger::exportToCsv(const QString &filePath) const
     QTextStream out(&file);
     out << "Timestamp,Level,Detector,Description,Files\n";
 
+    // The explicit QString return type matters: with QT_USE_QSTRINGBUILDER the
+    // concatenation below is a QStringBuilder that references `value`, which
+    // dies when the lambda returns (issue #25: a garbled first character).
+    const auto quote = [](QString value) -> QString {
+        // File names come from the synced folder, i.e. from the attacker.
+        // Spreadsheets run a cell starting with = + - @ (or a tab / CR before
+        // one) as a formula even inside quotes: make it plain text.
+        static const QString formulaStarts = QStringLiteral("=+-@\t\r");
+        if (!value.isEmpty() && formulaStarts.contains(value.at(0))) {
+            value.prepend(QLatin1Char('\''));
+        }
+        value.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+        return QStringLiteral("\"") + value + QStringLiteral("\"");
+    };
+
     QVector<ThreatInfo> threats = loadThreats();
     for (const ThreatInfo &threat : threats) {
-        QString files = threat.affectedFiles.join(QStringLiteral(";"));
-        // Escape quotes in description
-        QString desc = threat.description;
-        desc.replace(QStringLiteral("\""), QStringLiteral("\"\""));
-
         out << threat.timestamp.toString(Qt::ISODate) << ","
             << threatLevelToString(threat.level) << ","
-            << threat.detectorName << ","
-            << "\"" << desc << "\","
-            << "\"" << files << "\"\n";
+            << quote(threat.detectorName) << ","
+            << quote(threat.description) << ","
+            << quote(threat.affectedFiles.join(QStringLiteral(";"))) << "\n";
     }
 
     file.close();

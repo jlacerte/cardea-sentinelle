@@ -95,6 +95,50 @@
     </widget>
    </item>
    <item>
+    <layout class="QHBoxLayout" name="modeLayout">
+     <item>
+      <widget class="QLabel" name="modeLabel">
+       <property name="text">
+        <string>Mode:</string>
+       </property>
+       <property name="toolTip">
+        <string>Protect pauses synchronization when a threat is detected. Audit only logs and notifies, so thresholds can be tuned without false-positive pauses.</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="modeComboBox">
+       <property name="toolTip">
+        <string>Protect pauses synchronization when a threat is detected. Audit only logs and notifies, so thresholds can be tuned without false-positive pauses.</string>
+       </property>
+       <item>
+        <property name="text">
+         <string>Protect - pause sync when a threat is detected (Recommended)</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Audit - log and notify only, never pause sync</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <spacer name="modeSpacer">
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+       <property name="sizeHint" stdset="0">
+        <size>
+         <width>40</width>
+         <height>20</height>
+        </size>
+       </property>
+      </spacer>
+     </item>
+    </layout>
+   </item>
+   <item>
     <widget class="QGroupBox" name="settingsGroup">
      <property name="title">
       <string>Detection Settings</string>

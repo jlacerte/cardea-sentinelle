@@ -24,6 +24,7 @@ namespace Ui {
  *
  * Provides GUI controls for:
  * - Enabling/disabling kill switch protection
+ * - Choosing between Protect and Audit mode (see KillSwitchMode)
  * - Configuring detection thresholds
  * - Viewing threat history
  * - Managing canary files
@@ -46,6 +47,7 @@ public slots:
 
 private slots:
     void slotEnableToggled(bool enabled);
+    void slotModeChanged(int index);
     void slotPresetChanged(int index);
     void slotDeleteThresholdChanged(int value);
     void slotTimeWindowChanged(int value);
@@ -60,6 +62,7 @@ private slots:
     void slotThreatDetected(const ThreatInfo &threat);
     void slotThreatLevelChanged(int level);
     void slotTriggeredChanged(bool triggered);
+    void slotAuditTriggered(const ThreatInfo &threat);
 
 private:
     void setupConnections();
@@ -68,6 +71,12 @@ private:
     void customizeStyle();
     void applyPreset(int index);
     void updatePresetComboBox();
+
+    // Mode combo box indices (must match the item order in the .ui file)
+    enum ModeIndex {
+        ModeProtect = 0,
+        ModeAudit = 1
+    };
 
     // Preset indices
     enum PresetIndex {

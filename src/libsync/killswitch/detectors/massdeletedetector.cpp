@@ -145,7 +145,8 @@ QString MassDeleteDetector::detectTreeDeletion(const QStringList &paths) const
 }
 
 ThreatInfo MassDeleteDetector::analyze(const SyncFileItem &item,
-                                        const QVector<struct KillSwitchManager::Event> &recentEvents)
+                                        const QVector<struct KillSwitchManager::Event> &recentEvents,
+                                        const AnalysisContext &context)
 {
     ThreatInfo result;
     result.level = ThreatLevel::None;
@@ -183,7 +184,7 @@ ThreatInfo MassDeleteDetector::analyze(const SyncFileItem &item,
             if (!newestDelete.isValid() || event.timestamp > newestDelete) {
                 newestDelete = event.timestamp;
             }
-            result.affectedFiles.append(event.path);
+            result.affectedFiles.append(context.localPath(event.path));
         }
     }
 
@@ -199,11 +200,15 @@ ThreatInfo MassDeleteDetector::analyze(const SyncFileItem &item,
         qCInfo(lcMassDeleteDetector) << "Detected tree deletion:" << treeRoot;
     }
 
-    // Calculate deletion rate
+    // Calculate deletion rate. Only meaningful once we have seen a minimum
+    // number of deletions spread over at least MIN_RATE_WINDOW_MS: all items
+    // of one sync run are analyzed within milliseconds of each other, which
+    // would otherwise turn any two deletions into a "high deletion rate".
     double rate = 0.0;
-    if (oldestDelete.isValid() && newestDelete.isValid()) {
+    const int minDeletesForRate = qMax(3, m_threshold / 2);
+    if (deleteCount >= minDeletesForRate && oldestDelete.isValid() && newestDelete.isValid()) {
         qint64 msElapsed = oldestDelete.msecsTo(newestDelete);
-        if (msElapsed > 0) {
+        if (msElapsed >= MIN_RATE_WINDOW_MS) {
             rate = (deleteCount * 1000.0) / msElapsed; // files per second
         }
     }

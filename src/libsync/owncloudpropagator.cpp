@@ -344,11 +344,17 @@ void PropagateItemJob::reportClientStatuses()
 
 PropagateItemJob *OwncloudPropagator::createJob(const SyncFileItemPtr &item)
 {
-    // Kill Switch protection: analyze item before creating job
+    // Kill Switch protection: every item was analyzed by the SyncEngine right
+    // after discovery (SyncEngine::handleKillSwitchAnalysis). Re-analyzing here
+    // would record each event twice and halve every threshold. Only make sure
+    // nothing is propagated once the switch has been tripped.
     if (auto *killSwitch = KillSwitchManager::instance()) {
-        if (killSwitch->analyzeItem(*item)) {
-            // Threat detected - block this operation
-            qCWarning(lcPropagator) << "Kill Switch blocked operation on:" << item->_file;
+        if (killSwitch->isEnabled() && killSwitch->isTriggered()) {
+            qCWarning(lcPropagator) << "Kill Switch active - not propagating:" << item->_file;
+            // PropagateIgnoreJob expects an IGNORE item; ignored items are not
+            // written to the journal, so the next run after a reset picks them up.
+            item->_instruction = CSYNC_INSTRUCTION_IGNORE;
+            item->_errorString = tr("Not synced: Kill Switch protection is active");
             return new PropagateIgnoreJob(this, item);
         }
     }

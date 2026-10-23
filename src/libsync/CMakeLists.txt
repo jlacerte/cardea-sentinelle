@@ -181,11 +181,14 @@ set(libsync_SRCS
     killswitch/detectors/canarydetector.cpp
     killswitch/detectors/patterndetector.h
     killswitch/detectors/patterndetector.cpp
+    killswitch/detectors/formatsignaturedetector.h
+    killswitch/detectors/formatsignaturedetector.cpp
     killswitch/actions/syncaction.h
     killswitch/actions/backupaction.h
     killswitch/actions/backupaction.cpp
     killswitch/threatlogger.h
     killswitch/threatlogger.cpp
+    killswitch/alertthrottle.h
 )
 
 if (WIN32)

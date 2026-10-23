@@ -44,8 +44,11 @@
 #include "libsync/killswitch/detectors/entropydetector.h"
 #include "libsync/killswitch/detectors/canarydetector.h"
 #include "libsync/killswitch/detectors/patterndetector.h"
+#include "libsync/killswitch/detectors/formatsignaturedetector.h"
 #include "libsync/killswitch/threatlogger.h"
+#include "libsync/killswitch/alertthrottle.h"
 #include "libsync/killswitch/actions/backupaction.h"
+#include "killswitch/sentinelcontroller.h"
 #include "systray.h"
 
 #include "config.h"
@@ -513,6 +516,8 @@ void Application::setupAccountsAndFolders()
     killSwitch->registerDetector(std::make_shared<PatternDetector>());
     killSwitch->registerDetector(std::make_shared<CanaryDetector>());
     killSwitch->registerDetector(std::make_shared<MassDeleteDetector>());
+    // 5. FormatSignatureDetector - reads the first 4 KB and the tail of the file
+    killSwitch->registerDetector(std::make_shared<FormatSignatureDetector>());
     killSwitch->registerDetector(std::make_shared<EntropyDetector>());
 
     // Initialize threat logger
@@ -521,6 +526,14 @@ void Application::setupAccountsAndFolders()
     // Connect Kill Switch to threat logger
     connect(killSwitch, &KillSwitchManager::threatDetected, threatLogger, [threatLogger](const ThreatInfo &threat) {
         threatLogger->logThreat(threat, QStringLiteral("detected"));
+    });
+
+    // Audit mode: a would-be trigger is logged like a pause, so the history
+    // shows what Protect mode would have done.
+    connect(killSwitch, &KillSwitchManager::auditTriggered, threatLogger, [threatLogger](const ThreatInfo &threat) {
+        ThreatInfo auditInfo = threat;
+        auditInfo.description = QStringLiteral("AUDIT (would have paused sync): %1").arg(threat.description);
+        threatLogger->logThreat(auditInfo, QStringLiteral("audit_would_pause"));
     });
 
     connect(killSwitch, &KillSwitchManager::syncPaused, threatLogger, [threatLogger](const QString &reason) {
@@ -533,36 +546,43 @@ void Application::setupAccountsAndFolders()
         threatLogger->logThreat(pauseInfo, QStringLiteral("sync_paused"));
     });
 
-    // Connect Kill Switch to system tray notifications
-    connect(killSwitch, &KillSwitchManager::threatDetected, this, [](const ThreatInfo &threat) {
-        QString title = QStringLiteral("Sentinel: Threat Detected");
-        QString message;
-        QSystemTrayIcon::MessageIcon icon = QSystemTrayIcon::Warning;
-
-        switch (threat.level) {
-        case ThreatLevel::Critical:
-            title = QStringLiteral("SENTINEL: CRITICAL THREAT");
-            icon = QSystemTrayIcon::Critical;
-            break;
-        case ThreatLevel::High:
-            title = QStringLiteral("Sentinel: High Threat");
-            icon = QSystemTrayIcon::Critical;
-            break;
-        case ThreatLevel::Medium:
-            title = QStringLiteral("Sentinel: Medium Threat");
-            icon = QSystemTrayIcon::Warning;
-            break;
-        default:
-            icon = QSystemTrayIcon::Information;
-            break;
+    // Connect Kill Switch to system tray notifications. Low and Medium
+    // findings are logged and shown in the settings page; a tray popup for
+    // every single ".abc" file would train users to ignore the real alerts.
+    // In Audit mode nothing stops the analysis after a would-be trigger, so a
+    // burst gives one High finding per file: show at most one popup per 30 s.
+    auto auditThrottle = std::make_shared<AlertThrottle>(30);
+    connect(killSwitch, &KillSwitchManager::threatDetected, this, [killSwitch, auditThrottle](const ThreatInfo &threat) {
+        if (threat.level < ThreatLevel::High) {
+            return;
         }
 
-        message = QStringLiteral("%1\nDetector: %2\nFiles: %3")
-                      .arg(threat.description)
-                      .arg(threat.detectorName)
-                      .arg(threat.affectedFiles.join(QStringLiteral(", ")));
+        int heldBack = 0;
+        if (killSwitch->mode() == KillSwitchMode::Audit) {
+            if (!auditThrottle->allow(QDateTime::currentDateTime())) {
+                return;
+            }
+            heldBack = auditThrottle->takeSuppressed();
+        }
 
-        Systray::instance()->showMessage(title, message, icon);
+        const QString title = threat.level == ThreatLevel::Critical
+            ? tr("SENTINEL: CRITICAL THREAT")
+            : tr("Sentinel: High Threat");
+
+        QStringList files = threat.affectedFiles;
+        const int extra = files.size() - 5;
+        if (extra > 0) {
+            files = files.mid(0, 5);
+            files << tr("... and %n more", "", extra);
+        }
+
+        QString message = tr("%1\nDetector: %2\nFiles: %3")
+                              .arg(threat.description, threat.detectorName, files.join(QStringLiteral(", ")));
+        if (heldBack > 0) {
+            message += QLatin1Char('\n') + tr("%n more finding(s) since the last alert, see the threat history", "", heldBack);
+        }
+
+        Systray::instance()->showMessage(title, message, QSystemTrayIcon::Critical);
     });
 
     // Connect Kill Switch pause signal to systray
@@ -582,7 +602,32 @@ void Application::setupAccountsAndFolders()
     backupAction->setRetentionDays(7);       // Keep 7 days
     killSwitch->registerAction(backupAction);
 
-    qCInfo(lcApplication) << "Kill Switch protection initialized with 4 detectors, backup action, and notifications";
+    // The controller is the user-facing side of the kill switch: it pauses
+    // the sync folders and raises the alert dialog when the manager trips,
+    // and resumes exactly those folders once the user resets it. It is
+    // parented to the application so it outlives the FolderMan (which owns
+    // the manager); the slots guard against FolderMan::instance() being gone.
+    _sentinelController = new SentinelController(killSwitch, this);
+
+    // Apply the configuration persisted by Settings > Kill Switch. Without
+    // this the manager always starts with its built-in defaults, whatever
+    // the user chose last time.
+    {
+        auto settings = ConfigFile::settingsWithGroup(QStringLiteral("KillSwitch"));
+        killSwitch->setEnabled(settings->value(QStringLiteral("enabled"), true).toBool());
+        killSwitch->setMode(KillSwitchManager::modeFromString(
+            settings->value(QStringLiteral("mode"), QStringLiteral("protect")).toString()));
+        killSwitch->setDeleteThreshold(settings->value(QStringLiteral("deleteThreshold"), 10).toInt(),
+                                       settings->value(QStringLiteral("timeWindow"), 60).toInt());
+        killSwitch->setEntropyThreshold(settings->value(QStringLiteral("entropyThreshold"), 7.5).toDouble());
+        killSwitch->setAutoBackup(settings->value(QStringLiteral("autoBackup"), true).toBool());
+        const QStringList canaryFiles = settings->value(QStringLiteral("canaryFiles")).toStringList();
+        for (const QString &canaryFile : canaryFiles) {
+            killSwitch->addCanaryFile(canaryFile);
+        }
+    }
+
+    qCInfo(lcApplication) << "Kill Switch protection initialized with 5 detectors, backup action, and notifications";
 
     ConfigFile configFile;
     configFile.setMigrationPhase(ConfigFile::MigrationPhase::SetupUsers);

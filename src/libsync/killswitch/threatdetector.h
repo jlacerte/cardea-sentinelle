@@ -23,6 +23,9 @@ class SyncFileItem;
  * - EntropyDetector: Detects encrypted files via Shannon entropy analysis
  * - CanaryDetector: Detects modifications to honeypot/canary files
  * - PatternDetector: Detects ransomware extensions (.locked, .encrypted, ransom notes)
+ *
+ * Detectors are called from the sync thread, one item at a time, and are
+ * not required to be thread-safe.
  */
 class OWNCLOUDSYNC_EXPORT ThreatDetector
 {
@@ -38,10 +41,29 @@ public:
      * @brief Analyze a sync item and recent events for threats
      * @param item The current sync item being processed
      * @param recentEvents List of recent events in the time window
+     * @param context Where the item lives on disk (see AnalysisContext)
      * @return ThreatInfo with level None if no threat detected
      */
     virtual ThreatInfo analyze(const SyncFileItem &item,
-                               const QVector<struct KillSwitchManager::Event> &recentEvents) = 0;
+                               const QVector<struct KillSwitchManager::Event> &recentEvents,
+                               const AnalysisContext &context) = 0;
+
+    /**
+     * @brief Convenience overload without on-disk context (unit tests, in-memory checks)
+     */
+    ThreatInfo analyze(const SyncFileItem &item,
+                       const QVector<struct KillSwitchManager::Event> &recentEvents)
+    {
+        return analyze(item, recentEvents, AnalysisContext());
+    }
+
+    /**
+     * @brief Forget the hits a detector counts in its own time window
+     *
+     * Called by KillSwitchManager::reset() so that a reset after a false
+     * positive starts from zero. The default detector keeps no such state.
+     */
+    virtual void reset() {}
 
     /**
      * @brief Check if the detector is enabled

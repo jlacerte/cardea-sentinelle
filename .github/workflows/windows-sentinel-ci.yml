@@ -6,19 +6,36 @@ name: Windows Sentinel CI
 on:
   push:
     branches:
-      - master
-      - 'sentinel-*'
+      - '**'
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/windows-sentinel-ci.yml'
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - 'src/libsync/killswitch/**'
       - 'src/gui/killswitch/**'
-      - 'test/testkillswitch.cpp'
+      - 'src/gui/application.cpp'
+      - 'src/gui/application.h'
+      - 'src/libsync/syncengine.cpp'
+      - 'src/libsync/syncengine.h'
+      - 'src/libsync/owncloudpropagator.cpp'
+      - 'src/libsync/CMakeLists.txt'
+      - 'src/gui/CMakeLists.txt'
+      - 'test/**'
+      - 'admin/win/scripts/**'
+      - 'craftmaster.ini'
       - '.github/workflows/windows-sentinel-ci.yml'
   workflow_dispatch:
     inputs:
@@ -54,16 +71,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache Craft dependencies
+      # Only the dependencies are cached, saved right after they are installed.
+      # A cache saved at the end of the job also held the built and installed
+      # nextcloud-client: Craft then skipped the build on every later run and
+      # ctest pointed at a build folder that no longer existed.
+      - name: Restore Craft dependencies
         id: cache-craft
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             ${{ github.workspace }}\CraftMaster
             ${{ github.workspace }}\windows-msvc2022_64-cl
-          key: craft-windows-${{ runner.os }}-${{ hashFiles('.github/workflows/windows-sentinel-ci.yml') }}
-          restore-keys: |
-            craft-windows-${{ runner.os }}-
+          key: craft-deps-v2-${{ runner.os }}-${{ hashFiles('craftmaster.ini') }}
 
       - name: Install Craft Master
         if: steps.cache-craft.outputs.cache-hit != 'true'
@@ -116,6 +135,15 @@ jobs:
           craft --install-deps nextcloud-client
           Write-Host "::endgroup::"
 
+      - name: Save Craft dependencies
+        if: steps.cache-craft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ github.workspace }}\CraftMaster
+            ${{ github.workspace }}\windows-msvc2022_64-cl
+          key: ${{ steps.cache-craft.outputs.cache-primary-key }}
+
       - name: Setup PATH
         shell: pwsh
         run: |
@@ -157,7 +185,7 @@ jobs:
           Write-Host "::group::Run Kill Switch Tests"
 
           # Run Kill Switch specific tests
-          ctest -R KillSwitch --output-on-failure --timeout 300
+          ctest -R "KillSwitch|FormatSignature|ThreatLogger" --output-on-failure --timeout 300
           $killSwitchResult = $LASTEXITCODE
 
           Write-Host "::endgroup::"
@@ -170,9 +198,9 @@ jobs:
           Write-Host "Kill Switch tests passed successfully!"
 
       # NOTE: Upstream Nextcloud tests are run for visibility only.
-        # They have known flaky tests unrelated to Kill Switch.
-        # Only Kill Switch tests are required to pass.
-        - name: Run all tests (informational)
+      # They have known flaky tests unrelated to Kill Switch.
+      # Only Kill Switch tests are required to pass.
+      - name: Run all tests (informational)
         continue-on-error: true
         if: ${{ github.event.inputs.run_all_tests == 'true' || github.event_name == 'push' }}
         shell: pwsh
@@ -203,12 +231,12 @@ jobs:
 
           Write-Host "Core module files:"
           Get-ChildItem -Path $killSwitchDir -Recurse | ForEach-Object {
-              Write-Host "  $($_.FullName.Replace(${{ github.workspace }}, ''))"
+              Write-Host "  $($_.FullName.Replace($env:GITHUB_WORKSPACE, ''))"
           }
 
           Write-Host "`nGUI files:"
           Get-ChildItem -Path $guiDir -Recurse | ForEach-Object {
-              Write-Host "  $($_.FullName.Replace(${{ github.workspace }}, ''))"
+              Write-Host "  $($_.FullName.Replace($env:GITHUB_WORKSPACE, ''))"
           }
 
           Write-Host "::endgroup::"

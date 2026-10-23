@@ -3,7 +3,13 @@
 # SPDX-FileCopyrightText: 2026 Nextcloud Sentinel Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
-# Usage: .\build-sentinel.ps1 [-BuildType Release|Debug] [-Clean] [-Configure] [-Build] [-Test]
+# Usage: .\compile-sentinel.ps1 [-BuildType Release|Debug] [-Clean] [-Configure] [-Build] [-Test] [-Dev]
+#
+# -Dev builds the "NextcloudDev" variant: separate executable (nextclouddev.exe),
+# separate configuration folder (%APPDATA%\NextcloudDev) and separate
+# single-instance lock, so it can run next to the standard Nextcloud client
+# and never picks up its accounts and sync folders. Use it for every test
+# session. The build directory gets a "-dev" suffix.
 
 param(
     [ValidateSet("Release", "Debug", "RelWithDebInfo")]
@@ -14,7 +20,9 @@ param(
     [switch]$Build,
     [switch]$Test,
     [switch]$All,
+    [switch]$Dev,
 
+    # Only used when no KDE Craft prefix is installed (see install-craft.ps1)
     [string]$QtPath = "",
     [string]$Generator = "Ninja",
     [int]$Jobs = 0
@@ -28,8 +36,9 @@ $ProgressPreference = "SilentlyContinue"
 # ============================================================================
 
 $Script:SourceDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
-$Script:BuildDir = Join-Path $Script:SourceDir "build-windows-$BuildType"
-$Script:InstallDir = Join-Path $Script:SourceDir "install-windows-$BuildType"
+$Script:VariantSuffix = if ($Dev) { "-dev" } else { "" }
+$Script:BuildDir = Join-Path $Script:SourceDir "build-windows-$BuildType$Script:VariantSuffix"
+$Script:InstallDir = Join-Path $Script:SourceDir "install-windows-$BuildType$Script:VariantSuffix"
 
 # Default Qt paths to search
 $Script:QtSearchPaths = @(
@@ -39,8 +48,26 @@ $Script:QtSearchPaths = @(
     "$env:USERPROFILE\Qt\6.7.0\msvc2022_64"
 )
 
-# KDE Craft path (alternative dependency management)
-$Script:CraftRoot = "$env:USERPROFILE\CraftRoot"
+# KDE Craft (installed by install-craft.ps1): the prefix holds Qt, ECM, KF6,
+# QtKeychain, OpenSSL, SQLite... It is the ONLY source of Qt when present;
+# -QtPath / C:\Qt are only a fallback for machines without Craft.
+$Script:CraftTarget = "windows-msvc2022_64-cl"
+$Script:CraftRoot = if ($env:SENTINEL_CRAFT_ROOT) { $env:SENTINEL_CRAFT_ROOT } else { "C:\CraftRoot" }
+$Script:CraftPrefix = ""
+
+function Find-CraftPrefix {
+    $candidates = @(
+        (Join-Path $Script:CraftRoot $Script:CraftTarget),
+        "C:\CraftRoot\$Script:CraftTarget",
+        "$env:USERPROFILE\CraftRoot\$Script:CraftTarget"
+    )
+    foreach ($candidate in $candidates) {
+        if (Test-Path (Join-Path $candidate "lib\cmake\Qt6\Qt6Config.cmake")) {
+            return $candidate
+        }
+    }
+    return $null
+}
 
 # ============================================================================
 # Helper Functions
@@ -129,6 +156,13 @@ function Initialize-VSEnvironment {
 
     Write-Step "Initializing Visual Studio environment..."
 
+    # vcvars*.bat calls vswhere.exe by name; make sure the VS Installer folder
+    # is in PATH so it is found on machines with several VS editions (see issue #24).
+    $vsInstallerDir = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+    if ((Test-Path "$vsInstallerDir\vswhere.exe") -and ($env:PATH -notlike "*$vsInstallerDir*")) {
+        $env:PATH = "$vsInstallerDir;$env:PATH"
+    }
+
     # Run vcvars64.bat and capture environment
     $envVars = cmd /c "`"$vcvarsall`" && set" 2>&1
 
@@ -183,18 +217,30 @@ function Test-Prerequisites {
         }
     }
 
-    # Check Qt
-    $qtPath = Find-QtPath
-    if ($qtPath) {
-        Write-Step "Qt6 found: $qtPath"
-        $Script:QtPath = $qtPath
-        $env:Qt6_DIR = $qtPath
-        $env:PATH = "$qtPath\bin;$env:PATH"
+    # Check the Craft prefix (preferred: Qt + every other dependency, one consistent set)
+    $Script:CraftPrefix = Find-CraftPrefix
+    if ($Script:CraftPrefix) {
+        Write-Step "KDE Craft prefix found: $Script:CraftPrefix (Qt comes from here)"
+        $env:PATH = "$Script:CraftPrefix\bin;$Script:CraftPrefix\dev-utils\bin;$env:PATH"
+        $env:Qt6_DIR = "$Script:CraftPrefix\lib\cmake\Qt6"
+        if ($Script:QtPath -ne "") {
+            Write-Warning "-QtPath was given but a Craft prefix exists; the Craft Qt is used to avoid mixing two Qt builds"
+            $Script:QtPath = ""
+        }
     } else {
-        Write-Error "Qt 6.7+ not found"
-        Write-Host "  Install from: https://www.qt.io/download-qt-installer"
-        Write-Host "  Or set -QtPath parameter"
-        $allGood = $false
+        # Fallback: a standalone Qt in C:\Qt. KF6/ECM then have to come from somewhere else (vcpkg or an old Craft layout).
+        $qtPath = Find-QtPath
+        if ($qtPath) {
+            Write-Step "Qt6 found: $qtPath (no Craft prefix; ECM/KF6 must be provided separately)"
+            $Script:QtPath = $qtPath
+            $env:Qt6_DIR = $qtPath
+            $env:PATH = "$qtPath\bin;$env:PATH"
+        } else {
+            Write-Error "No KDE Craft prefix and no Qt 6.8 found"
+            Write-Host "  Run: .\install-craft.ps1   (installs Qt and all other dependencies, recommended)"
+            Write-Host "  Or set -QtPath / Qt6_DIR to a standalone Qt 6.8 msvc2022_64"
+            $allGood = $false
+        }
     }
 
     # Check Git
@@ -206,12 +252,28 @@ function Test-Prerequisites {
         $allGood = $false
     }
 
+    # Check Inkscape: cmake/modules/GenerateIconsUtils.cmake needs an SVG
+    # converter (inkscape or rsvg-convert) and fails the configure step without it.
+    $inkscapeDir = "C:\Program Files\Inkscape\bin"
+    if ((Test-Command "inkscape") -or (Test-Command "rsvg-convert")) {
+        Write-Step "SVG converter found (Inkscape / rsvg-convert)"
+    } elseif (Test-Path "$inkscapeDir\inkscape.exe") {
+        Write-Step "Inkscape found at $inkscapeDir (added to PATH for this build)"
+        $env:PATH = "$inkscapeDir;$env:PATH"
+    } else {
+        Write-Error "Inkscape not found (needed to generate the application icons)"
+        Write-Host "  Install: winget install --id Inkscape.Inkscape -e   (then open a new PowerShell)"
+        $allGood = $false
+    }
+
     # Check for ECM/KF6 (via Craft or vcpkg)
     $ecmFound = $false
 
     # Check Craft
-    if (Test-Path "$Script:CraftRoot\craft\craftenv.ps1") {
-        Write-Step "KDE Craft found at: $Script:CraftRoot"
+    if ($Script:CraftPrefix) {
+        $ecmFound = $true
+    } elseif (Test-Path "$Script:CraftRoot\craft\craftenv.ps1") {
+        Write-Warning "Old-style Craft layout at $Script:CraftRoot (no $Script:CraftTarget prefix); run .\install-craft.ps1 to get the supported layout"
         $ecmFound = $true
     }
 
@@ -223,7 +285,7 @@ function Test-Prerequisites {
 
     if (-not $ecmFound) {
         Write-Warning "ECM/KF6 not found via Craft or vcpkg"
-        Write-Host "  Run: .\install-dependencies.ps1 to install via KDE Craft"
+        Write-Host "  Run: .\install-craft.ps1 to install everything via KDE Craft"
     }
 
     return $allGood
@@ -259,17 +321,28 @@ function Invoke-Configure {
     Push-Location $Script:BuildDir
 
     try {
+        # One prefix list, Craft first: Qt, ECM, KF6, QtKeychain, OpenSSL, SQLite all
+        # come from the same place. A standalone Qt is only used without Craft.
+        $prefixPath = if ($Script:CraftPrefix) { $Script:CraftPrefix } else { $Script:QtPath }
+
         $cmakeArgs = @(
             "-S", $Script:SourceDir,
             "-B", $Script:BuildDir,
             "-G", $Script:Generator,
             "-DCMAKE_BUILD_TYPE=$BuildType",
             "-DCMAKE_INSTALL_PREFIX=$Script:InstallDir",
-            "-DCMAKE_PREFIX_PATH=$Script:QtPath",
+            "-DCMAKE_PREFIX_PATH=$prefixPath",
             "-DBUILD_TESTING=ON",
             "-DBUILD_UPDATER=ON",
             "-DWITH_CRASHREPORTER=OFF"
         )
+
+        if ($Dev) {
+            # NextcloudDev identity: own exe name, own config folder, own
+            # single-instance lock. Safe to run next to the real client.
+            $cmakeArgs += "-DNEXTCLOUD_DEV=ON"
+            Write-Step "Dev variant: building nextclouddev.exe (separate config folder)"
+        }
 
         # Add Ninja-specific options
         if ($Script:Generator -eq "Ninja") {
@@ -286,8 +359,8 @@ function Invoke-Configure {
             }
         }
 
-        # Add Craft paths if available
-        if (Test-Path "$Script:CraftRoot\craft") {
+        # Legacy Craft layout (craft installed directly in the root, no target prefix)
+        if (-not $Script:CraftPrefix -and (Test-Path "$Script:CraftRoot\craft")) {
             $cmakeArgs += "-DCMAKE_PREFIX_PATH=$Script:CraftRoot;$Script:QtPath"
         }
 

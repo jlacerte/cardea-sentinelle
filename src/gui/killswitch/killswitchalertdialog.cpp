@@ -31,6 +31,18 @@ KillSwitchAlertDialog::KillSwitchAlertDialog(const QString &reason,
     // Set the reason text
     _ui->reasonLabel->setText(reason);
 
+    // Tell the user what happened to the sync folders and how to get out
+    // of it. "Keep Protection Active" only closes this dialog; the folders
+    // stay paused until the kill switch is reset from the settings page.
+    _ui->subtitleLabel->setText(tr("All sync folders have been paused to protect your data"));
+    _ui->warningLabel->setText(
+        tr("Reset restarts the synchronization: if the files listed below are still "
+           "encrypted or suspicious, the Kill Switch will trip again immediately. "
+           "First restore them from the server (web interface > Versions / Deleted files) "
+           "or delete them, then reset. Only reset right away if you are certain this was "
+           "a false positive. Your sync folders stay paused until the Kill Switch is reset "
+           "here or in Settings > Kill Switch."));
+
     // Populate threat details
     populateThreats(threats);
 

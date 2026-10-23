@@ -118,7 +118,12 @@ python --version  # >= 3.10
 
 **Status:** ☐ Complété
 
-### Étape 2.3: Installer Qt 6.8
+### Étape 2.3: Installer Qt 6.8 (uniquement SANS Craft)
+
+> **Recommandé : sauter cette étape et passer à 2.4.** Avec KDE Craft, Qt est
+> installé par Craft et c'est le seul Qt utilisé par les scripts de build. Un
+> second Qt dans `C:\Qt` provoque des erreurs de liaison et des DLL
+> incompatibles. Cette étape ne sert que pour une compilation sans Craft.
 
 1. **Télécharger** Qt Online Installer:
    - https://www.qt.io/download-qt-installer
@@ -145,34 +150,33 @@ $env:Qt6_DIR = "C:\Qt\6.8.0\msvc2022_64"
 
 **Status:** ☐ Complété
 
-### Étape 2.4: Installer KDE Craft
+### Étape 2.4: Installer KDE Craft (Qt, ECM, KF6, QtKeychain, OpenSSL, SQLite)
 
 ```powershell
 cd D:\nextcloud\nextcloud-sentinel\admin\win\scripts
-.\install-dependencies.ps1 -UseCraft
+.\install-craft.ps1            # 20-60 min, reprend si interrompu
+.\install-craft.ps1 -Verify    # contrôle final
 ```
 
-Ou manuellement:
+Le script applique la recette de la CI Windows : CraftMaster, `craftmaster.ini`
+du dépôt (version de Qt, blueprints Nextcloud, cache binaire), puis
+`craft --install-deps nextcloud-client`. Résultat dans
+`C:\CraftRoot\windows-msvc2022_64-cl` (racine modifiable avec `-CraftRoot`,
+à reporter dans la variable d'environnement `SENTINEL_CRAFT_ROOT`).
+
+Équivalent manuel (ce que fait le script) :
 ```powershell
-$CraftRoot = "$env:USERPROFILE\CraftRoot"
-New-Item -ItemType Directory -Path $CraftRoot -Force
-cd $CraftRoot
-
-# Télécharger et exécuter bootstrap
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1" -OutFile "install_craft.ps1"
-.\install_craft.ps1 --prefix $CraftRoot --compiler msvc2022
-
-# Installer les dépendances KDE
-. .\craft\craftenv.ps1
-craft kde/frameworks/extra-cmake-modules
-craft kde/frameworks/tier1/karchive
-craft kde/frameworks/tier1/ki18n
-craft kde/frameworks/tier1/kconfig
-craft libs/openssl
-craft libs/sqlite
+$Root = "C:\CraftRoot"
+git clone --depth=1 https://invent.kde.org/packaging/craftmaster.git $Root\CraftMaster
+# fichier $Root\craftmaster-local.ini : [windows-msvc2022_64-cl] Paths/Python = <dossier de python.exe>
+function craft { python $Root\CraftMaster\CraftMaster.py --config D:\nextcloud\nextcloud-sentinel\craftmaster.ini --config-override $Root\craftmaster-local.ini --variables Root=$Root --targets windows-msvc2022_64-cl -c @args }
+craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-kde.git|stable-4.0|"
+craft --add-blueprint-repository "https://github.com/nextcloud/desktop-client-blueprints.git|stable-4.0|"
+craft craft
+craft --install-deps nextcloud-client
 ```
 
-**Chemin Craft:** _________________________
+**Chemin Craft:** C:\CraftRoot\windows-msvc2022_64-cl (ou _________________________)
 
 **Status:** ☐ Complété
 
@@ -202,12 +206,13 @@ cd D:\nextcloud\nextcloud-sentinel\admin\win\scripts
 Ou manuellement:
 ```powershell
 cd D:\nextcloud\nextcloud-sentinel
-mkdir build-windows
-cd build-windows
+mkdir build-windows-Release-dev
+cd build-windows-Release-dev
 
 cmake .. -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
-    -DCMAKE_PREFIX_PATH="C:\Qt\6.8.0\msvc2022_64;$env:USERPROFILE\CraftRoot" `
+    -DCMAKE_PREFIX_PATH="C:\CraftRoot\windows-msvc2022_64-cl" `
+    -DNEXTCLOUD_DEV=ON `
     -DBUILD_TESTING=ON `
     -DBUILD_UPDATER=ON
 ```
@@ -224,7 +229,7 @@ cmake .. -G Ninja `
 
 Ou manuellement:
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows
+cd D:\nextcloud\nextcloud-sentinel\build-windows-Release-dev
 cmake --build . --parallel
 ```
 
@@ -242,8 +247,8 @@ cmake --build . --parallel
 
 Ou manuellement:
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows
-ctest -R KillSwitch --output-on-failure
+cd D:\nextcloud\nextcloud-sentinel\build-windows-Release-dev
+ctest -R "KillSwitch|FormatSignature|ThreatLogger" --output-on-failure
 ```
 
 **Résultats des tests:**
@@ -292,9 +297,14 @@ ctest -R KillSwitch --output-on-failure
 ### Étape 4.3: Lancer le client (optionnel)
 
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows\bin
-.\nextcloud.exe
+cd D:\nextcloud\nextcloud-sentinel
+.\admin\win\scripts\test-sentinel.ps1 -Run
 ```
+
+Ce script lance `build-windows-Release-dev\bin\nextclouddev.exe` avec le `PATH`
+de Craft. `-DNEXTCLOUD_DEV=ON` produit la variante Dev, qui a son propre nom,
+son propre verrou et sa propre configuration. Ne lancez pas un `nextcloud.exe`
+compilé sans cette option : il partagerait la configuration du client officiel.
 
 **Le client démarre:** ☐ Oui / ☐ Non
 
@@ -317,17 +327,13 @@ cd D:\nextcloud\nextcloud-sentinel\build-windows\bin
 
 ## Dépannage
 
-### CMake ne trouve pas Qt
+### CMake ne trouve pas Qt ou ECM
 ```powershell
-$env:Qt6_DIR = "C:\Qt\6.8.0\msvc2022_64"
-cmake .. -DCMAKE_PREFIX_PATH="$env:Qt6_DIR"
+.\admin\win\scripts\install-craft.ps1 -Verify      # le préfixe est-il complet ?
+cmake .. -DCMAKE_PREFIX_PATH="C:\CraftRoot\windows-msvc2022_64-cl"
 ```
-
-### CMake ne trouve pas ECM
-```powershell
-. $env:USERPROFILE\CraftRoot\craft\craftenv.ps1
-cmake .. -DCMAKE_PREFIX_PATH="$env:USERPROFILE\CraftRoot;$env:Qt6_DIR"
-```
+Si vous aviez aussi un Qt dans `C:\Qt`, retirez-le du `PATH` et de `Qt6_DIR` :
+un seul Qt, celui de Craft.
 
 ### Erreur LNK2019 (unresolved external)
 ```powershell

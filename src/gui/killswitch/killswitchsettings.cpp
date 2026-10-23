@@ -58,6 +58,10 @@ void KillSwitchSettings::setupConnections()
     connect(_ui->enableKillSwitch, &QCheckBox::toggled,
             this, &KillSwitchSettings::slotEnableToggled);
 
+    // Protect / Audit mode
+    connect(_ui->modeComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, &KillSwitchSettings::slotModeChanged);
+
     // Preset selection
     connect(_ui->presetComboBox, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &KillSwitchSettings::slotPresetChanged);
@@ -94,6 +98,8 @@ void KillSwitchSettings::setupConnections()
                 });
         connect(manager, &KillSwitchManager::triggeredChanged,
                 this, &KillSwitchSettings::slotTriggeredChanged);
+        connect(manager, &KillSwitchManager::auditTriggered,
+                this, &KillSwitchSettings::slotAuditTriggered);
     }
 }
 
@@ -106,6 +112,9 @@ void KillSwitchSettings::loadSettings()
 
     // Load settings from config
     _ui->enableKillSwitch->setChecked(settings->value(QStringLiteral("enabled"), true).toBool());
+    const KillSwitchMode mode = KillSwitchManager::modeFromString(
+        settings->value(QStringLiteral("mode"), QStringLiteral("protect")).toString());
+    _ui->modeComboBox->setCurrentIndex(mode == KillSwitchMode::Audit ? ModeAudit : ModeProtect);
     _ui->deleteThresholdSpinBox->setValue(settings->value(QStringLiteral("deleteThreshold"), 10).toInt());
     _ui->timeWindowSpinBox->setValue(settings->value(QStringLiteral("timeWindow"), 60).toInt());
     _ui->entropyThresholdSpinBox->setValue(settings->value(QStringLiteral("entropyThreshold"), 7.5).toDouble());
@@ -135,6 +144,10 @@ void KillSwitchSettings::saveSettings()
     auto settings = ConfigFile::settingsWithGroup(QStringLiteral("KillSwitch"));
 
     settings->setValue(QStringLiteral("enabled"), _ui->enableKillSwitch->isChecked());
+    settings->setValue(QStringLiteral("mode"),
+                       KillSwitchManager::modeToString(_ui->modeComboBox->currentIndex() == ModeAudit
+                                                           ? KillSwitchMode::Audit
+                                                           : KillSwitchMode::Protect));
     settings->setValue(QStringLiteral("deleteThreshold"), _ui->deleteThresholdSpinBox->value());
     settings->setValue(QStringLiteral("timeWindow"), _ui->timeWindowSpinBox->value());
     settings->setValue(QStringLiteral("entropyThreshold"), _ui->entropyThresholdSpinBox->value());
@@ -155,6 +168,8 @@ void KillSwitchSettings::slotEnableToggled(bool enabled)
         manager->setEnabled(enabled);
     }
 
+    _ui->modeLabel->setEnabled(enabled);
+    _ui->modeComboBox->setEnabled(enabled);
     _ui->settingsGroup->setEnabled(enabled);
     _ui->canaryGroup->setEnabled(enabled);
 
@@ -162,6 +177,20 @@ void KillSwitchSettings::slotEnableToggled(bool enabled)
     updateStatusIndicator();
 
     qCInfo(lcKillSwitchSettings) << "Kill Switch" << (enabled ? "enabled" : "disabled");
+}
+
+void KillSwitchSettings::slotModeChanged(int index)
+{
+    const KillSwitchMode mode = index == ModeAudit ? KillSwitchMode::Audit : KillSwitchMode::Protect;
+
+    if (auto *manager = KillSwitchManager::instance()) {
+        manager->setMode(mode);
+    }
+
+    saveSettings();
+    updateStatusIndicator();
+
+    qCInfo(lcKillSwitchSettings) << "Kill Switch mode set to" << KillSwitchManager::modeToString(mode);
 }
 
 void KillSwitchSettings::slotPresetChanged(int index)
@@ -304,6 +333,11 @@ void KillSwitchSettings::slotRemoveCanaryFile()
     if (item) {
         QString filename = item->text();
         delete _ui->canaryListWidget->takeItem(_ui->canaryListWidget->row(item));
+
+        if (auto *manager = KillSwitchManager::instance()) {
+            manager->removeCanaryFile(filename);
+        }
+
         saveSettings();
         qCInfo(lcKillSwitchSettings) << "Removed canary file:" << filename;
     }
@@ -312,7 +346,18 @@ void KillSwitchSettings::slotRemoveCanaryFile()
 void KillSwitchSettings::slotResetKillSwitch()
 {
     auto *manager = KillSwitchManager::instance();
-    if (!manager || !manager->isTriggered()) {
+    if (!manager) {
+        return;
+    }
+
+    if (!manager->isTriggered()) {
+        // Audit mode: the button only clears the would-be trigger counter.
+        // Nothing is paused, so there is nothing to confirm.
+        if (manager->auditTriggerCount() > 0) {
+            manager->clearAuditTriggers();
+            updateStatusIndicator();
+            qCInfo(lcKillSwitchSettings) << "Audit would-be triggers cleared by user";
+        }
         return;
     }
 
@@ -327,6 +372,7 @@ void KillSwitchSettings::slotResetKillSwitch()
 
     if (reply == QMessageBox::Yes) {
         manager->reset();
+        manager->clearAuditTriggers();
         updateStatusIndicator();
         qCInfo(lcKillSwitchSettings) << "Kill Switch reset by user";
     }
@@ -387,17 +433,17 @@ void KillSwitchSettings::slotThreatLevelChanged(int /*level*/)
     updateStatusIndicator();
 }
 
-void KillSwitchSettings::slotTriggeredChanged(bool triggered)
+void KillSwitchSettings::slotTriggeredChanged(bool /*triggered*/)
 {
+    // updateStatusIndicator() derives the label, the indicator and the
+    // reset button from the manager state (triggered, mode, threat level).
     updateStatusIndicator();
+}
 
-    if (triggered) {
-        _ui->resetButton->setEnabled(true);
-        _ui->statusLabel->setText(tr("TRIGGERED - Sync Paused"));
-        _ui->statusLabel->setStyleSheet("QLabel { color: #FF0000; font-weight: bold; }");
-    } else {
-        _ui->resetButton->setEnabled(false);
-    }
+void KillSwitchSettings::slotAuditTriggered(const ThreatInfo &threat)
+{
+    qCWarning(lcKillSwitchSettings) << "Audit mode: Kill Switch would have triggered -" << threat.description;
+    updateStatusIndicator();
 }
 
 void KillSwitchSettings::updateThreatDisplay()
@@ -429,10 +475,25 @@ void KillSwitchSettings::updateStatusIndicator()
             "QLabel { background-color: #FF0000; border-radius: 10px; min-width: 20px; min-height: 20px; }");
         _ui->statusLabel->setText(tr("TRIGGERED - Sync Paused"));
         _ui->statusLabel->setStyleSheet("QLabel { color: #FF0000; font-weight: bold; }");
+        _ui->resetButton->setText(tr("Reset Kill Switch"));
         _ui->resetButton->setEnabled(true);
         return;
     }
 
+    if (manager->mode() == KillSwitchMode::Audit) {
+        const int count = manager->auditTriggerCount();
+        _ui->statusIndicator->setStyleSheet(
+            "QLabel { background-color: #FFA500; border-radius: 10px; min-width: 20px; min-height: 20px; }");
+        _ui->statusLabel->setText(tr("AUDIT MODE - detections are logged, sync is never paused (%n would-be trigger(s))",
+                                     "", count));
+        _ui->statusLabel->setStyleSheet("QLabel { color: #FFA500; font-weight: bold; }");
+        // In audit mode the button clears the would-be trigger counter (slotResetKillSwitch).
+        _ui->resetButton->setText(tr("Clear Would-be Triggers"));
+        _ui->resetButton->setEnabled(count > 0);
+        return;
+    }
+
+    _ui->resetButton->setText(tr("Reset Kill Switch"));
     _ui->resetButton->setEnabled(false);
 
     switch (manager->currentThreatLevel()) {

@@ -10,8 +10,10 @@
 
 #include <QFile>
 #include <QFileInfo>
-#include <cmath>
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <iterator>
 
 namespace OCC {
 
@@ -19,19 +21,49 @@ namespace OCC {
 const QStringList EntropyDetector::s_highEntropyExtensions = {
     // Archives
     QStringLiteral(".zip"), QStringLiteral(".gz"), QStringLiteral(".bz2"),
-    QStringLiteral(".xz"), QStringLiteral(".7z"), QStringLiteral(".rar"),
-    QStringLiteral(".tar.gz"), QStringLiteral(".tgz"),
+    QStringLiteral(".xz"), QStringLiteral(".zst"), QStringLiteral(".lz4"),
+    QStringLiteral(".7z"), QStringLiteral(".rar"), QStringLiteral(".tar.gz"),
+    QStringLiteral(".tgz"), QStringLiteral(".tbz2"), QStringLiteral(".txz"),
+    QStringLiteral(".cab"), QStringLiteral(".jar"), QStringLiteral(".war"),
+    QStringLiteral(".apk"), QStringLiteral(".ipa"), QStringLiteral(".whl"),
+    QStringLiteral(".nupkg"), QStringLiteral(".deb"), QStringLiteral(".rpm"),
+    QStringLiteral(".msi"), QStringLiteral(".dmg"), QStringLiteral(".pkg"),
+    QStringLiteral(".appimage"), QStringLiteral(".snap"), QStringLiteral(".flatpak"),
     // Images (compressed)
     QStringLiteral(".jpg"), QStringLiteral(".jpeg"), QStringLiteral(".png"),
-    QStringLiteral(".gif"), QStringLiteral(".webp"),
+    QStringLiteral(".gif"), QStringLiteral(".webp"), QStringLiteral(".heic"),
+    QStringLiteral(".heif"), QStringLiteral(".avif"), QStringLiteral(".jxl"),
+    QStringLiteral(".cr2"), QStringLiteral(".nef"), QStringLiteral(".arw"),
+    QStringLiteral(".dng"), QStringLiteral(".raf"), QStringLiteral(".orf"),
     // Media
-    QStringLiteral(".mp3"), QStringLiteral(".mp4"), QStringLiteral(".avi"),
-    QStringLiteral(".mkv"), QStringLiteral(".flac"), QStringLiteral(".ogg"),
+    QStringLiteral(".mp3"), QStringLiteral(".mp4"), QStringLiteral(".m4a"),
+    QStringLiteral(".m4v"), QStringLiteral(".aac"), QStringLiteral(".opus"),
+    QStringLiteral(".avi"), QStringLiteral(".mov"), QStringLiteral(".mkv"),
+    QStringLiteral(".webm"), QStringLiteral(".flac"), QStringLiteral(".ogg"),
+    QStringLiteral(".wma"), QStringLiteral(".wmv"), QStringLiteral(".flv"),
+    QStringLiteral(".3gp"), QStringLiteral(".ts"), QStringLiteral(".mts"),
     // Documents (often compressed internally)
     QStringLiteral(".pdf"), QStringLiteral(".docx"), QStringLiteral(".xlsx"),
-    QStringLiteral(".pptx"), QStringLiteral(".odt"), QStringLiteral(".ods"),
-    // Encrypted
-    QStringLiteral(".gpg"), QStringLiteral(".aes"), QStringLiteral(".enc"),
+    QStringLiteral(".pptx"), QStringLiteral(".docm"), QStringLiteral(".xlsm"),
+    QStringLiteral(".pptm"), QStringLiteral(".odt"), QStringLiteral(".ods"),
+    QStringLiteral(".odp"), QStringLiteral(".odg"), QStringLiteral(".epub"),
+    QStringLiteral(".pages"), QStringLiteral(".numbers"), QStringLiteral(".key"),
+    QStringLiteral(".kra"), QStringLiteral(".xcf"), QStringLiteral(".sketch"),
+    QStringLiteral(".fig"), QStringLiteral(".blend"),
+    // Fonts and disk/VM images
+    QStringLiteral(".woff"), QStringLiteral(".woff2"), QStringLiteral(".iso"),
+    QStringLiteral(".img"), QStringLiteral(".vmdk"), QStringLiteral(".vdi"),
+    QStringLiteral(".qcow2"), QStringLiteral(".vhd"), QStringLiteral(".vhdx"),
+    // Encrypted by design (password managers, PGP, keys, certificates)
+    QStringLiteral(".gpg"), QStringLiteral(".pgp"), QStringLiteral(".asc"),
+    QStringLiteral(".aes"), QStringLiteral(".enc"), QStringLiteral(".kdbx"),
+    QStringLiteral(".kdb"), QStringLiteral(".1pif"), QStringLiteral(".opvault"),
+    QStringLiteral(".agilekeychain"), QStringLiteral(".psafe3"), QStringLiteral(".p12"),
+    QStringLiteral(".pfx"), QStringLiteral(".der"), QStringLiteral(".crt"),
+    QStringLiteral(".cer"), QStringLiteral(".axx"), QStringLiteral(".hc"),
+    QStringLiteral(".tc"), QStringLiteral(".vault"), QStringLiteral(".cryptomator"),
+    // Git / package manager object stores
+    QStringLiteral(".pack"), QStringLiteral(".idx"),
 };
 
 EntropyDetector::EntropyDetector()
@@ -179,19 +211,23 @@ void EntropyDetector::updateCache(const QString &filePath, double entropy) const
         return;
     }
 
-    // Remove from current position if exists
-    int existingIndex = m_cacheOrder.indexOf(filePath);
-    if (existingIndex >= 0) {
-        m_cacheOrder.removeAt(existingIndex);
+    // Touch: move an existing node to the back (most recently used), or
+    // append a new one. Both are O(1): the hash lookup finds the node and
+    // std::list::splice relinks it without copying.
+    auto pos = m_cachePositions.find(filePath);
+    if (pos != m_cachePositions.end()) {
+        m_cacheOrder.splice(m_cacheOrder.end(), m_cacheOrder, pos.value());
+    } else {
+        m_cacheOrder.push_back(filePath);
+        m_cachePositions.insert(filePath, std::prev(m_cacheOrder.end()));
     }
-
-    // Add to end (most recently used)
-    m_cacheOrder.append(filePath);
     m_entropyCache[filePath] = entropy;
 
-    // Evict oldest if over limit
-    while (m_cacheOrder.size() > m_cacheMaxSize && !m_cacheOrder.isEmpty()) {
-        QString oldest = m_cacheOrder.takeFirst();
+    // Evict least recently used entries from the front while over the limit
+    while (static_cast<int>(m_cachePositions.size()) > m_cacheMaxSize && !m_cacheOrder.empty()) {
+        const QString oldest = m_cacheOrder.front();
+        m_cacheOrder.pop_front();
+        m_cachePositions.remove(oldest);
         m_entropyCache.remove(oldest);
     }
 }
@@ -256,7 +292,8 @@ QPair<double, double> EntropyDetector::expectedEntropyRange(const QString &fileP
 }
 
 ThreatInfo EntropyDetector::analyze(const SyncFileItem &item,
-                                     const QVector<struct KillSwitchManager::Event> &recentEvents)
+                                     const QVector<struct KillSwitchManager::Event> &recentEvents,
+                                     const AnalysisContext &context)
 {
     Q_UNUSED(recentEvents)
 
@@ -279,6 +316,12 @@ ThreatInfo EntropyDetector::analyze(const SyncFileItem &item,
         return result;
     }
 
+    // Only local changes carry local content worth measuring. For a download
+    // the file on disk is either absent or still the previous version.
+    if (item._direction == SyncFileItem::Down) {
+        return result;
+    }
+
     // Skip files that normally have high entropy
     if (isNormallyHighEntropy(item._file)) {
         return result;
@@ -286,49 +329,78 @@ ThreatInfo EntropyDetector::analyze(const SyncFileItem &item,
 
     // Calculate current entropy using multi-block sampling for accuracy
     // This is more reliable for detecting partial encryption
-    double entropy = calculateMultiBlockEntropy(item._file);
+    const QString localPath = context.localPath(item._file);
+    double entropy = calculateMultiBlockEntropy(localPath);
     if (entropy < 0) {
         return result; // Could not read file
     }
 
     // Get expected range for this file type
     auto expectedRange = expectedEntropyRange(item._file);
+    const bool knownType = expectedRange.second < 8.0;
 
-    // Check if entropy is suspicious
-    if (entropy >= m_highThreshold) {
-        result.level = ThreatLevel::Critical;
-        result.description = QStringLiteral("Critical entropy: %1 bits/byte (file: %2)")
-                                 .arg(entropy, 0, 'f', 3)
-                                 .arg(item._file);
-        result.affectedFiles.append(item._file);
-    } else if (entropy >= m_suspiciousThreshold && entropy > expectedRange.second) {
+    // Previous entropy of this file, if we have seen it before
+    double oldEntropy = -1.0;
+    if (m_cacheEnabled && m_entropyCache.contains(item._file)) {
+        oldEntropy = m_entropyCache[item._file];
+    }
+    const bool spike = oldEntropy >= 0.0 && (entropy - oldEntropy) > 2.0 && entropy > 7.0;
+
+    if (knownType && entropy >= m_suspiciousThreshold && entropy > expectedRange.second) {
+        // A text-like file cannot legitimately look like random data.
         result.level = ThreatLevel::High;
         result.description = QStringLiteral("Suspicious entropy: %1 (expected: %2-%3) for %4")
                                  .arg(entropy, 0, 'f', 3)
                                  .arg(expectedRange.first, 0, 'f', 1)
                                  .arg(expectedRange.second, 0, 'f', 1)
                                  .arg(item._file);
-        result.affectedFiles.append(item._file);
-    } else if (m_cacheEnabled && m_entropyCache.contains(item._file)) {
-        // Check for sudden entropy increase (ransomware encryption)
-        double oldEntropy = m_entropyCache[item._file];
-        double increase = entropy - oldEntropy;
+        result.affectedFiles.append(localPath);
+        recordHit(QDateTime::currentDateTime());
+    } else if (entropy >= m_highThreshold || spike) {
+        // Unknown type with random-looking content, or content that became
+        // random since we last saw it. One file is not an attack (password
+        // databases, disk images, proprietary formats), a burst of them is.
+        const int hits = recordHit(QDateTime::currentDateTime());
 
-        if (increase > 2.0 && entropy > 7.0) {
+        if (hits >= m_threshold * 2) {
+            result.level = ThreatLevel::Critical;
+        } else if (hits >= m_threshold) {
             result.level = ThreatLevel::High;
-            result.description = QStringLiteral("Entropy spike: %1 -> %2 (delta: +%3) for %4")
+        } else {
+            result.level = ThreatLevel::Medium;
+        }
+
+        if (spike) {
+            result.description = QStringLiteral("Entropy spike: %1 -> %2 (delta: +%3) for %4 (%5 high-entropy files in window)")
                                      .arg(oldEntropy, 0, 'f', 1)
                                      .arg(entropy, 0, 'f', 1)
-                                     .arg(increase, 0, 'f', 1)
-                                     .arg(item._file);
-            result.affectedFiles.append(item._file);
+                                     .arg(entropy - oldEntropy, 0, 'f', 1)
+                                     .arg(item._file)
+                                     .arg(hits);
+        } else {
+            result.description = QStringLiteral("High entropy: %1 bits/byte for %2 (%3 high-entropy files in window)")
+                                     .arg(entropy, 0, 'f', 3)
+                                     .arg(item._file)
+                                     .arg(hits);
         }
+        result.affectedFiles.append(localPath);
     }
 
     // Update cache with LRU eviction
     updateCache(item._file, entropy);
 
     return result;
+}
+
+int EntropyDetector::recordHit(const QDateTime &now)
+{
+    const QDateTime cutoff = now.addSecs(-m_windowSeconds);
+    m_recentHits.erase(
+        std::remove_if(m_recentHits.begin(), m_recentHits.end(),
+                       [&cutoff](const QDateTime &t) { return t < cutoff; }),
+        m_recentHits.end());
+    m_recentHits.append(now);
+    return m_recentHits.size();
 }
 
 } // namespace OCC
