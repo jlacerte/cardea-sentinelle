@@ -71,16 +71,18 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache Craft dependencies
+      # Only the dependencies are cached, saved right after they are installed.
+      # A cache saved at the end of the job also held the built and installed
+      # nextcloud-client: Craft then skipped the build on every later run and
+      # ctest pointed at a build folder that no longer existed.
+      - name: Restore Craft dependencies
         id: cache-craft
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             ${{ github.workspace }}\CraftMaster
             ${{ github.workspace }}\windows-msvc2022_64-cl
-          key: craft-windows-${{ runner.os }}-${{ hashFiles('.github/workflows/windows-sentinel-ci.yml') }}
-          restore-keys: |
-            craft-windows-${{ runner.os }}-
+          key: craft-deps-v2-${{ runner.os }}-${{ hashFiles('craftmaster.ini') }}
 
       - name: Install Craft Master
         if: steps.cache-craft.outputs.cache-hit != 'true'
@@ -132,6 +134,15 @@ jobs:
           Write-Host "::group::Install dependencies"
           craft --install-deps nextcloud-client
           Write-Host "::endgroup::"
+
+      - name: Save Craft dependencies
+        if: steps.cache-craft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ github.workspace }}\CraftMaster
+            ${{ github.workspace }}\windows-msvc2022_64-cl
+          key: ${{ steps.cache-craft.outputs.cache-primary-key }}
 
       - name: Setup PATH
         shell: pwsh
