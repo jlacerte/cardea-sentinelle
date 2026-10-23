@@ -188,6 +188,7 @@ set(libsync_SRCS
     killswitch/actions/backupaction.cpp
     killswitch/threatlogger.h
     killswitch/threatlogger.cpp
+    killswitch/alertthrottle.h
 )
 
 if (WIN32)

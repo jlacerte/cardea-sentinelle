@@ -21,6 +21,7 @@
 #include "libsync/killswitch/detectors/patterndetector.h"
 #include "libsync/killswitch/actions/backupaction.h"
 #include "libsync/syncfileitem.h"
+#include "libsync/killswitch/alertthrottle.h"
 #include "libsync/owncloudpropagator.h"
 #include "syncenginetestutils.h"
 
@@ -207,6 +208,27 @@ private slots:
         job->start();
         QCOMPARE(item->_status, SyncFileItem::FileIgnored);
         QVERIFY(item->_errorString.contains(QStringLiteral("Kill Switch")));
+    }
+
+    void testAlertThrottle()
+    {
+        AlertThrottle throttle(30);
+        const QDateTime t0(QDate(2026, 10, 23), QTime(12, 0, 0));
+
+        QVERIFY(throttle.allow(t0));
+        QCOMPARE(throttle.takeSuppressed(), 0);
+
+        // A burst within the interval is held back and counted
+        for (int i = 1; i <= 50; i++) {
+            QVERIFY(!throttle.allow(t0.addMSecs(i * 100)));
+        }
+        QVERIFY(!throttle.allow(t0.addSecs(29)));
+
+        // The next alert after the interval goes through and reports the burst
+        QVERIFY(throttle.allow(t0.addSecs(30)));
+        QCOMPARE(throttle.takeSuppressed(), 51);
+        QCOMPARE(throttle.takeSuppressed(), 0);
+        QVERIFY(!throttle.allow(t0.addSecs(31)));
     }
 
     void testManagerDoubleTrigger()

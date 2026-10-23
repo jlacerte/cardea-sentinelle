@@ -46,6 +46,7 @@
 #include "libsync/killswitch/detectors/patterndetector.h"
 #include "libsync/killswitch/detectors/formatsignaturedetector.h"
 #include "libsync/killswitch/threatlogger.h"
+#include "libsync/killswitch/alertthrottle.h"
 #include "libsync/killswitch/actions/backupaction.h"
 #include "killswitch/sentinelcontroller.h"
 #include "systray.h"
@@ -548,9 +549,20 @@ void Application::setupAccountsAndFolders()
     // Connect Kill Switch to system tray notifications. Low and Medium
     // findings are logged and shown in the settings page; a tray popup for
     // every single ".abc" file would train users to ignore the real alerts.
-    connect(killSwitch, &KillSwitchManager::threatDetected, this, [](const ThreatInfo &threat) {
+    // In Audit mode nothing stops the analysis after a would-be trigger, so a
+    // burst gives one High finding per file: show at most one popup per 30 s.
+    auto auditThrottle = std::make_shared<AlertThrottle>(30);
+    connect(killSwitch, &KillSwitchManager::threatDetected, this, [killSwitch, auditThrottle](const ThreatInfo &threat) {
         if (threat.level < ThreatLevel::High) {
             return;
+        }
+
+        int heldBack = 0;
+        if (killSwitch->mode() == KillSwitchMode::Audit) {
+            if (!auditThrottle->allow(QDateTime::currentDateTime())) {
+                return;
+            }
+            heldBack = auditThrottle->takeSuppressed();
         }
 
         const QString title = threat.level == ThreatLevel::Critical
@@ -564,8 +576,11 @@ void Application::setupAccountsAndFolders()
             files << tr("... and %n more", "", extra);
         }
 
-        const QString message = tr("%1\nDetector: %2\nFiles: %3")
-                                    .arg(threat.description, threat.detectorName, files.join(QStringLiteral(", ")));
+        QString message = tr("%1\nDetector: %2\nFiles: %3")
+                              .arg(threat.description, threat.detectorName, files.join(QStringLiteral(", ")));
+        if (heldBack > 0) {
+            message += QLatin1Char('\n') + tr("%n more finding(s) since the last alert, see the threat history", "", heldBack);
+        }
 
         Systray::instance()->showMessage(title, message, QSystemTrayIcon::Critical);
     });
