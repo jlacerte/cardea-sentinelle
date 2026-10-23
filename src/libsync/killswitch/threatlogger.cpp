@@ -349,6 +349,13 @@ bool ThreatLogger::exportToCsv(const QString &filePath) const
     // concatenation below is a QStringBuilder that references `value`, which
     // dies when the lambda returns (issue #25: a garbled first character).
     const auto quote = [](QString value) -> QString {
+        // File names come from the synced folder, i.e. from the attacker.
+        // Spreadsheets run a cell starting with = + - @ (or a tab / CR before
+        // one) as a formula even inside quotes: make it plain text.
+        static const QString formulaStarts = QStringLiteral("=+-@\t\r");
+        if (!value.isEmpty() && formulaStarts.contains(value.at(0))) {
+            value.prepend(QLatin1Char('\''));
+        }
         value.replace(QStringLiteral("\""), QStringLiteral("\"\""));
         return QStringLiteral("\"") + value + QStringLiteral("\"");
     };

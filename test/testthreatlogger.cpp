@@ -254,6 +254,39 @@ private slots:
         QCOMPARE(logger.getStatistics().totalThreats, 2);
     }
 
+    void testCsvExportNeutralizesFormulas()
+    {
+        // File names come from the synced folder; a value starting with = + - @
+        // must not run as a formula when the export is opened in a spreadsheet.
+        ThreatLogger logger;
+        ThreatInfo threat = makeThreat(0, ThreatLevel::High, QStringLiteral("@Detector"));
+        threat.description = QStringLiteral("-2+3");
+        threat.affectedFiles = {QStringLiteral("=HYPERLINK(\"http://x\",\"a\").docx")};
+        logger.logThreat(threat);
+
+        ThreatInfo plain = makeThreat(1, ThreatLevel::High, QStringLiteral("PatternDetector"));
+        plain.description = QStringLiteral("a-b");
+        plain.affectedFiles = {QStringLiteral("x+y.docx")};
+        logger.logThreat(plain);
+
+        QTemporaryDir tmp;
+        QVERIFY(tmp.isValid());
+        const QString csvPath = tmp.filePath(QStringLiteral("export.csv"));
+        QVERIFY(logger.exportToCsv(csvPath));
+
+        QFile csv(csvPath);
+        QVERIFY(csv.open(QIODevice::ReadOnly));
+        const QStringList lines = QString::fromUtf8(csv.readAll()).remove(QLatin1Char('\r')).split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+        QCOMPARE(lines.size(), 3);
+        QCOMPARE(lines[1],
+                 QStringLiteral("%1,High,\"'@Detector\",\"'-2+3\",\"'=HYPERLINK(\"\"http://x\"\",\"\"a\"\").docx\"")
+                     .arg(threat.timestamp.toString(Qt::ISODate)));
+        // Those characters further inside a value change nothing
+        QCOMPARE(lines[2],
+                 QStringLiteral("%1,High,\"PatternDetector\",\"a-b\",\"x+y.docx\"")
+                     .arg(plain.timestamp.toString(Qt::ISODate)));
+    }
+
     void testCsvExportQuoting()
     {
         ThreatLogger logger;
