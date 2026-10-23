@@ -220,12 +220,12 @@ jobs:
 
           Write-Host "Core module files:"
           Get-ChildItem -Path $killSwitchDir -Recurse | ForEach-Object {
-              Write-Host "  $($_.FullName.Replace(${{ github.workspace }}, ''))"
+              Write-Host "  $($_.FullName.Replace($env:GITHUB_WORKSPACE, ''))"
           }
 
           Write-Host "`nGUI files:"
           Get-ChildItem -Path $guiDir -Recurse | ForEach-Object {
-              Write-Host "  $($_.FullName.Replace(${{ github.workspace }}, ''))"
+              Write-Host "  $($_.FullName.Replace($env:GITHUB_WORKSPACE, ''))"
           }
 
           Write-Host "::endgroup::"

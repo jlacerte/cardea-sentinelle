@@ -300,7 +300,8 @@ QByteArray textDocument(int approxSize, const QString &topic)
         "Agenda for the weekly planning meeting and the follow-up actions.",
         "The quarterly figures were discussed; the revenue forecast was adjusted.",
         "Bitte die Unterlagen bis Freitag an die Buchhaltung weiterleiten.",
-        "Le rapport annuel sera publi\xC3\xA9 au d\xC3\xA9" "but du mois prochain.",
+        // Split so "\xA9b" is not read as one hex escape; parenthesized for -Wstring-concatenation
+        ("Le rapport annuel sera publi\xC3\xA9 au d\xC3\xA9" "but du mois prochain."),
         "Reminder: the backup rotation moves to the new NAS on the 15th.",
         "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod.",
     };
