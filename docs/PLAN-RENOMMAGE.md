@@ -5,7 +5,20 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
 # Plan : régulariser le nom du projet
 
-Statut : **proposé, phase 0 en attente de John** (2026-10-23).
+Statut : **phase 0 décidée** (2026-10-23), phase 1 à lancer.
+
+Décisions de la phase 0 :
+
+- Produit : **Cardea**, d'après la déesse romaine gardienne du seuil.
+  Nom affiché définitif (« Cardea » ou « Cardea Sentinelle ») à fixer en phase 3.
+- Dépôt : **`jlacerte/cardea-sentinelle`**. « Sentinelle » est en français, et
+  il n'y a pas de « desktop » parce que d'autres appareils sont visés.
+- Titulaire SPDX des fichiers du projet :
+  `SPDX-FileCopyrightText: 2026 Justin Lacerte and Cardea contributors`.
+- Vérification du nom par recherche web : aucun anti-rançongiciel, antivirus
+  ou outil de sauvegarde nommé Cardea. Point de vigilance : la marque CARDEA
+  d'Intesa Sanpaolo (classe 9, logiciels financiers, UE et États-Unis), à
+  revoir en cas de commercialisation. Pas de dépôt à l'OPIC pour l'instant.
 Suivi : projet Archon « Sentinel », document « Plan de renommage » et tâches
 « Renommage – phase N ».
 
