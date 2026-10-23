@@ -351,6 +351,10 @@ PropagateItemJob *OwncloudPropagator::createJob(const SyncFileItemPtr &item)
     if (auto *killSwitch = KillSwitchManager::instance()) {
         if (killSwitch->isEnabled() && killSwitch->isTriggered()) {
             qCWarning(lcPropagator) << "Kill Switch active - not propagating:" << item->_file;
+            // PropagateIgnoreJob expects an IGNORE item; ignored items are not
+            // written to the journal, so the next run after a reset picks them up.
+            item->_instruction = CSYNC_INSTRUCTION_IGNORE;
+            item->_errorString = tr("Not synced: Kill Switch protection is active");
             return new PropagateIgnoreJob(this, item);
         }
     }

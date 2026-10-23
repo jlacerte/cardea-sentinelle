@@ -21,6 +21,8 @@
 #include "libsync/killswitch/detectors/patterndetector.h"
 #include "libsync/killswitch/actions/backupaction.h"
 #include "libsync/syncfileitem.h"
+#include "libsync/owncloudpropagator.h"
+#include "syncenginetestutils.h"
 
 using namespace OCC;
 
@@ -176,6 +178,35 @@ private slots:
         QCOMPARE(analyze(QStringLiteral("c.dat")), ThreatLevel::Medium);
         QCOMPARE(analyze(QStringLiteral("d.dat")), ThreatLevel::Medium);
         QCOMPARE(analyze(QStringLiteral("e.dat")), ThreatLevel::High);
+    }
+
+    void testTriggeredSwitchPropagatesItemsAsIgnored()
+    {
+        // createJob() hands a tripped switch's items to PropagateIgnoreJob,
+        // which asserts (fatal in debug builds) unless the item is IGNORE.
+        FakeFolder fakeFolder{FileInfo::A12_B12_C12_S12()};
+        _manager->trigger(QStringLiteral("Test trigger"));
+        QVERIFY(_manager->isTriggered());
+
+        QSet<QString> bulkUploadBlackList;
+        OwncloudPropagator propagator(fakeFolder.account(), fakeFolder.localPath(), QStringLiteral("/"),
+                                      &fakeFolder.syncJournal(), bulkUploadBlackList);
+
+        auto item = SyncFileItemPtr::create();
+        item->_file = QStringLiteral("A/new.txt");
+        item->_type = ItemTypeFile;
+        item->_instruction = CSYNC_INSTRUCTION_NEW;
+        item->_direction = SyncFileItem::Up;
+
+        PropagateItemJob *job = propagator.createJob(item);
+        QVERIFY(job);
+        // PropagateIgnoreJob is not exported from the library: compare by name
+        QCOMPARE(QByteArray(job->metaObject()->className()), QByteArray("OCC::PropagateIgnoreJob"));
+        QCOMPARE(item->_instruction, CSYNC_INSTRUCTION_IGNORE);
+
+        job->start();
+        QCOMPARE(item->_status, SyncFileItem::FileIgnored);
+        QVERIFY(item->_errorString.contains(QStringLiteral("Kill Switch")));
     }
 
     void testManagerDoubleTrigger()
