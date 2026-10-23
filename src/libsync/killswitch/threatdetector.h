@@ -58,6 +58,14 @@ public:
     }
 
     /**
+     * @brief Forget the hits a detector counts in its own time window
+     *
+     * Called by KillSwitchManager::reset() so that a reset after a false
+     * positive starts from zero. The default detector keeps no such state.
+     */
+    virtual void reset() {}
+
+    /**
      * @brief Check if the detector is enabled
      */
     bool isEnabled() const { return m_enabled; }

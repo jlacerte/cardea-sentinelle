@@ -123,6 +123,61 @@ private slots:
         QCOMPARE(resumedSpy.count(), 1);
     }
 
+    void testManagerResetClearsDetectorHitWindows()
+    {
+        // Two high-entropy files are below the threshold of 3. After a reset
+        // (the user confirmed a false positive) a single new file must not
+        // reach the threshold with the hits counted before the reset.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        auto entropy = std::make_shared<EntropyDetector>();
+        entropy->setThreshold(3);
+        _manager->registerDetector(entropy);
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+
+        const auto analyzeNewRandomFile = [&](const QString &name) {
+            writeRandomFile(dir.filePath(name), 65536);
+            SyncFileItem item;
+            item._instruction = CSYNC_INSTRUCTION_NEW;
+            item._type = ItemTypeFile;
+            item._file = name;
+            return _manager->analyzeItem(item, context);
+        };
+
+        QVERIFY(!analyzeNewRandomFile(QStringLiteral("before0.dat")));
+        QVERIFY(!analyzeNewRandomFile(QStringLiteral("before1.dat")));
+        _manager->reset();
+        QVERIFY(!analyzeNewRandomFile(QStringLiteral("after0.dat")));
+        QVERIFY(!_manager->isTriggered());
+    }
+
+    void testEntropyDetectorResetClearsHitWindow()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        EntropyDetector detector;
+        detector.setThreshold(3);
+        AnalysisContext context;
+        context.localRootPath = dir.path();
+
+        const auto analyze = [&](const QString &name) {
+            writeRandomFile(dir.filePath(name), 65536);
+            SyncFileItem item;
+            item._instruction = CSYNC_INSTRUCTION_NEW;
+            item._type = ItemTypeFile;
+            item._file = name;
+            return detector.analyze(item, {}, context).level;
+        };
+
+        QCOMPARE(analyze(QStringLiteral("a.dat")), ThreatLevel::Medium);
+        QCOMPARE(analyze(QStringLiteral("b.dat")), ThreatLevel::Medium);
+        detector.reset();
+        QCOMPARE(analyze(QStringLiteral("c.dat")), ThreatLevel::Medium);
+        QCOMPARE(analyze(QStringLiteral("d.dat")), ThreatLevel::Medium);
+        QCOMPARE(analyze(QStringLiteral("e.dat")), ThreatLevel::High);
+    }
+
     void testManagerDoubleTrigger()
     {
         QSignalSpy triggeredSpy(_manager, &KillSwitchManager::triggeredChanged);

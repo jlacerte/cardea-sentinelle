@@ -341,6 +341,9 @@ void KillSwitchManager::reset()
     m_threatLevel = ThreatLevel::None;
     m_threats.clear();
     m_recentEvents.clear();
+    for (const auto &detector : std::as_const(m_detectors)) {
+        detector->reset();
+    }
 
     qCInfo(lcKillSwitch) << "Kill Switch reset by user";
 

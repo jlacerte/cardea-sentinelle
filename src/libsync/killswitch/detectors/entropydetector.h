@@ -47,6 +47,10 @@ public:
                        const QVector<struct KillSwitchManager::Event> &recentEvents,
                        const AnalysisContext &context) override;
 
+    /// Forget the high-entropy hits counted in the window (KillSwitchManager::reset()).
+    /// The entropy cache is kept: it describes the files, not the attack.
+    void reset() override { m_recentHits.clear(); }
+
     // Configuration
     void setHighEntropyThreshold(double threshold) { m_highThreshold = threshold; }
     void setSuspiciousEntropyThreshold(double threshold) { m_suspiciousThreshold = threshold; }

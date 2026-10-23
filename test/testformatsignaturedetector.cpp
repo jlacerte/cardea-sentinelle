@@ -973,6 +973,25 @@ private slots:
         }
     }
 
+    void testResetClearsMismatchWindow()
+    {
+        FormatSignatureDetector detector;
+        detector.setThreshold(3);
+        detector.setWindowSeconds(60);
+        QVector<KillSwitchManager::Event> events;
+
+        const auto analyzeNew = [&](const QString &name) {
+            write(name, randomBytes(5000));
+            return detector.analyze(makeItem(name), events, context()).level;
+        };
+
+        QCOMPARE(analyzeNew(QStringLiteral("before0.jpg")), ThreatLevel::Medium);
+        QCOMPARE(analyzeNew(QStringLiteral("before1.jpg")), ThreatLevel::Medium);
+        detector.reset();
+        // Without the reset this third mismatch would be High
+        QCOMPARE(analyzeNew(QStringLiteral("after0.jpg")), ThreatLevel::Medium);
+    }
+
     void testAnalyzeSyncMismatchIsHighImmediately()
     {
         write("existing.pdf", randomBytes(5000));

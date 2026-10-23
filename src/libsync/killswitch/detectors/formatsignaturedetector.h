@@ -112,6 +112,9 @@ public:
                        const QVector<struct KillSwitchManager::Event> &recentEvents,
                        const AnalysisContext &context) override;
 
+    /// Forget the mismatch hits counted in the window (KillSwitchManager::reset())
+    void reset() override { m_recentHits.clear(); }
+
     /**
      * @brief Check a file on disk against the signature its name promises
      * @param localPath Absolute path of the file to read
