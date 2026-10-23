@@ -254,6 +254,30 @@ private slots:
         QCOMPARE(logger.getStatistics().totalThreats, 2);
     }
 
+    void testTruncatedLastLineDoesNotSwallowNextEntry()
+    {
+        // A crash in the middle of a write leaves the last line without '\n'.
+        // After the restart, the next entry must start on its own line
+        // instead of being glued to the truncated one and dropped with it.
+        QString path;
+        {
+            ThreatLogger before;
+            before.logThreat(makeThreat(0));
+            path = before.logFilePath();
+        }
+        appendRaw(path, "{\"timestamp\":\"2026-01-11T15:30:05\",\"level\":\"Hi");
+
+        ThreatLogger logger;
+        logger.logThreat(makeThreat(1));
+        logger.logThreat(makeThreat(2));
+
+        const QVector<ThreatInfo> loaded = logger.loadThreats();
+        QCOMPARE(loaded.size(), 3);
+        QCOMPARE(loaded[0].description, QStringLiteral("Threat number 0"));
+        QCOMPARE(loaded[1].description, QStringLiteral("Threat number 1"));
+        QCOMPARE(loaded[2].description, QStringLiteral("Threat number 2"));
+    }
+
     void testCsvExportNeutralizesFormulas()
     {
         // File names come from the synced folder; a value starting with = + - @

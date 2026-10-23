@@ -147,6 +147,9 @@ private:
     QString m_rotatedLogFilePath;
     QString m_legacyLogFilePath;
     qint64 m_rotationSizeBytes = DEFAULT_ROTATION_SIZE_BYTES;
+    // Whether the end of the log file has been checked for a truncated line
+    // (left by a crash before this logger existed, or by a failed write)
+    bool m_tailChecked = false;
 };
 
 } // namespace OCC

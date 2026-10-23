@@ -199,19 +199,37 @@ void ThreatLogger::rotateIfNeeded()
 
 bool ThreatLogger::appendLine(const QByteArray &line)
 {
+    // A crash or a short write can leave the last line without its '\n'.
+    // Close it first, or the new entry is glued to it and both are lost as
+    // one malformed line. The empty line this may leave is skipped on load.
+    // Every line this logger writes ends with '\n', so the file is read once,
+    // not on every append (reading it each time is slow on Windows).
+    QByteArray data;
+    if (!m_tailChecked) {
+        QFile existing(m_logFilePath);
+        char last = '\n';
+        if (existing.size() > 0 && existing.open(QIODevice::ReadOnly)
+            && existing.seek(existing.size() - 1) && existing.getChar(&last) && last != '\n') {
+            data.append('\n');
+        }
+        m_tailChecked = true;
+    }
+    data.append(line);
+    data.append('\n');
+
     QFile file(m_logFilePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
         qCWarning(lcThreatLogger) << "Could not open log file for appending:" << m_logFilePath << file.errorString();
+        m_tailChecked = false;
         return false;
     }
 
-    QByteArray data = line;
-    data.append('\n');
     const bool ok = file.write(data) == data.size();
     file.flush();
     file.close();
     if (!ok) {
         qCWarning(lcThreatLogger) << "Short write to log file:" << m_logFilePath << file.errorString();
+        m_tailChecked = false;
     }
     return ok;
 }
