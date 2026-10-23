@@ -9,8 +9,9 @@ Statut : **phase 0 décidée** (2026-10-23), phase 1 à lancer.
 
 Décisions de la phase 0 :
 
-- Produit : **Cardea**, d'après la déesse romaine gardienne du seuil.
-  Nom affiché définitif (« Cardea » ou « Cardea Sentinelle ») à fixer en phase 3.
+- Produit : **Cardea Sentinelle**, d'après Cardea, la déesse romaine gardienne
+  du seuil. Le nom court de l'exécutable et du dossier de configuration est à
+  fixer en phase 3.
 - Dépôt : **`jlacerte/cardea-sentinelle`**. « Sentinelle » est en français, et
   il n'y a pas de « desktop » parce que d'autres appareils sont visés.
 - Titulaire SPDX des fichiers du projet :
