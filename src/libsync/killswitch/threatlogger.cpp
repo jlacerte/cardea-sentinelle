@@ -345,7 +345,10 @@ bool ThreatLogger::exportToCsv(const QString &filePath) const
     QTextStream out(&file);
     out << "Timestamp,Level,Detector,Description,Files\n";
 
-    const auto quote = [](QString value) {
+    // The explicit QString return type matters: with QT_USE_QSTRINGBUILDER the
+    // concatenation below is a QStringBuilder that references `value`, which
+    // dies when the lambda returns (issue #25: a garbled first character).
+    const auto quote = [](QString value) -> QString {
         value.replace(QStringLiteral("\""), QStringLiteral("\"\""));
         return QStringLiteral("\"") + value + QStringLiteral("\"");
     };
