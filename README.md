@@ -289,8 +289,8 @@ We're a small team with a big vision. If you believe sync clients should protect
 # Create a feature branch
 git checkout -b feature/my-feature
 
-# Make changes and test (Windows: admin/win/scripts/compile-sentinel.ps1 -Build)
-cd build && ctest -R "KillSwitch|FormatSignature"
+# Make changes and test (Windows: admin/win/scripts/test-sentinel.ps1 -Build -Test)
+cd build && ctest -R "KillSwitch|FormatSignature|ThreatLogger"
 
 # Submit a PR
 ```

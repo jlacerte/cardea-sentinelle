@@ -209,4 +209,4 @@ build-local.ps1
 build-wsl.sh
 
 # Sentinel test pipeline logs
-logs/
+/logs/

@@ -206,8 +206,8 @@ cd D:\nextcloud\nextcloud-sentinel\admin\win\scripts
 Ou manuellement:
 ```powershell
 cd D:\nextcloud\nextcloud-sentinel
-mkdir build-windows
-cd build-windows
+mkdir build-windows-Release-dev
+cd build-windows-Release-dev
 
 cmake .. -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
@@ -229,7 +229,7 @@ cmake .. -G Ninja `
 
 Ou manuellement:
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows
+cd D:\nextcloud\nextcloud-sentinel\build-windows-Release-dev
 cmake --build . --parallel
 ```
 
@@ -247,8 +247,8 @@ cmake --build . --parallel
 
 Ou manuellement:
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows
-ctest -R KillSwitch --output-on-failure
+cd D:\nextcloud\nextcloud-sentinel\build-windows-Release-dev
+ctest -R "KillSwitch|FormatSignature|ThreatLogger" --output-on-failure
 ```
 
 **Résultats des tests:**
@@ -297,9 +297,14 @@ ctest -R KillSwitch --output-on-failure
 ### Étape 4.3: Lancer le client (optionnel)
 
 ```powershell
-cd D:\nextcloud\nextcloud-sentinel\build-windows\bin
-.\nextcloud.exe
+cd D:\nextcloud\nextcloud-sentinel
+.\admin\win\scripts\test-sentinel.ps1 -Run
 ```
+
+Ce script lance `build-windows-Release-dev\bin\nextclouddev.exe` avec le `PATH`
+de Craft. `-DNEXTCLOUD_DEV=ON` produit la variante Dev, qui a son propre nom,
+son propre verrou et sa propre configuration. Ne lancez pas un `nextcloud.exe`
+compilé sans cette option : il partagerait la configuration du client officiel.
 
 **Le client démarre:** ☐ Oui / ☐ Non
 

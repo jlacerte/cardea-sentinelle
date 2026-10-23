@@ -163,13 +163,14 @@ rapide.
 ```
 
 L'étape `Test` ajoute les DLL de Qt et de Craft au `PATH`, puis lance
-`ctest -R "KillSwitch|FormatSignature"` dans le dossier de build. Attendu :
+`ctest -R "KillSwitch|FormatSignature|ThreatLogger"` dans le dossier de build. Attendu :
 
 | Suite | Tests | Contenu |
 |---|---|---|
-| `KillSwitchTest` | 128 | manager, chaque détecteur, faux positifs, renommages, concurrence |
-| `FormatSignatureDetectorTest` | 38 | signatures de formats, chiffrement par blocs, leurres |
+| `KillSwitchTest` | 137 | manager, mode audit, chaque détecteur, faux positifs, renommages, concurrence |
+| `FormatSignatureDetectorTest` | 50 | signatures de formats, chiffrement par blocs, parcours de structure, leurres |
 | `KillSwitchScenariosTest` | 26 | attaques complètes et usages normaux sur un bac à sable |
+| `ThreatLoggerTest` | 13 | journal JSON Lines, rotation, migration, export CSV |
 
 Le script échoue si un test échoue et liste les tests en cause. Comme les
 exécutables QtTest peuvent ne rien afficher sur la console Windows, il relance
@@ -177,8 +178,8 @@ aussi chaque suite avec `-o fichier,txt`, affiche la ligne `Totals:` de chacune
 et garde les rapports dans `logs\`. Pour tout lancer d'un coup : `-All`
 (= `-Update -Build -Test`).
 
-Équivalent manuel (depuis le dossier de build, avec `C:\Qt\6.8.x\msvc2022_64\bin`
-et `%USERPROFILE%\CraftRoot\bin` dans le `PATH`) :
+Équivalent manuel (depuis le dossier de build, avec
+`C:\CraftRoot\windows-msvc2022_64-cl\bin` dans le `PATH` ; Qt vient de Craft) :
 
 ```powershell
 cd build-windows-Release-dev

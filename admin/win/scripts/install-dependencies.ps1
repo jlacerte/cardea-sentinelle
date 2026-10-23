@@ -19,6 +19,10 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
+# Inside a function $PSBoundParameters holds the function's own parameters,
+# so remember here whether the caller chose a Craft root.
+$Script:CraftRootGiven = $PSBoundParameters.ContainsKey("CraftRoot")
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -192,7 +196,7 @@ function Install-KDECraft {
     }
 
     $cmdArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $installer)
-    if ($PSBoundParameters.ContainsKey("CraftRoot")) { $cmdArgs += @("-CraftRoot", $CraftRoot) }
+    if ($Script:CraftRootGiven) { $cmdArgs += @("-CraftRoot", $CraftRoot) }
     & powershell.exe @cmdArgs
     if ($LASTEXITCODE -ne 0) {
         Write-Error "install-craft.ps1 failed (exit code $LASTEXITCODE); see logs\install-craft-*.log"
@@ -272,7 +276,9 @@ if ($InstallQt) {
 }
 
 if ($UseCraft) {
-    Install-KDECraft
+    if (-not (Install-KDECraft)) {
+        exit 1
+    }
 }
 
 if ($UseVcpkg) {

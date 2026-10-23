@@ -5,7 +5,8 @@
 #
 # One script for the whole test loop on a Windows workstation:
 #
-#   -Update    fetch and fast-forward the working branch (refuses to touch local changes)
+#   -Update    fetch and fast-forward the current branch, or -Branch if given
+#              (refuses to touch local changes)
 #   -Build     configure + build the "NextcloudDev" variant (nextclouddev.exe, own config folder,
 #              runs next to the standard Nextcloud client and never sees its accounts)
 #   -Test      run the Kill Switch test suites with ctest
@@ -27,7 +28,8 @@
 
 [CmdletBinding()]
 param(
-    [string]$Branch = "claude/hopeful-goldberg-7iu995",
+    # -Update only: branch to switch to (default: the branch currently checked out)
+    [string]$Branch = "",
 
     [ValidateSet("Release", "Debug", "RelWithDebInfo")]
     [string]$BuildType = "Release",
@@ -287,9 +289,17 @@ function Step-Prerequisites {
 }
 
 function Step-Update {
-    Write-Header "Updating repository (branch: $Branch)"
-
     Set-Location $Script:RepoDir
+
+    $current = Get-NativeOutput "git" @("rev-parse", "--abbrev-ref", "HEAD")
+    if (-not $Branch) {
+        if ($current -eq "HEAD") {
+            throw "Detached HEAD: no current branch to update. Check out a branch, or pass -Branch <name>."
+        }
+        $Branch = $current
+    }
+
+    Write-Header "Updating repository (branch: $Branch)"
 
     # Never clobber local work.
     $dirty = Get-NativeOutput "git" @("status", "--porcelain", "--untracked-files=no")
@@ -303,7 +313,6 @@ function Step-Update {
         Invoke-Native "git" @("fetch", "origin", $Branch) -FailureHint "Check your network / proxy, and that the branch exists on https://github.com/jlacerte/nextcloud-sentinel"
     }
 
-    $current = Get-NativeOutput "git" @("rev-parse", "--abbrev-ref", "HEAD")
     if ($current -ne $Branch) {
         Write-Step "Switching from '$current' to '$Branch'"
         $exists = & git show-ref --verify --quiet "refs/heads/$Branch"; $localExists = ($LASTEXITCODE -eq 0)
@@ -339,7 +348,7 @@ function Step-Build {
 
     # compile-sentinel.ps1 calls `exit` on failure, so it has to run in its
     # own process; the exit code is what we check.
-    Invoke-Native "powershell.exe" $cmdArgs -FailureHint "Read the first [X] line above. Most common causes: Qt 6.8 not installed in C:\Qt (pass -QtPath), Visual Studio 2022 C++ tools missing, KDE Craft dependencies not installed (run .\install-dependencies.ps1 -UseCraft)."
+    Invoke-Native "powershell.exe" $cmdArgs -FailureHint "Read the first [X] line above. Most common causes: KDE Craft prefix missing or incomplete (run .\install-craft.ps1; Qt comes from Craft, do not mix it with a standalone Qt), Visual Studio 2022 C++ tools missing, Inkscape not installed (needed for the icons)."
 
     if (-not (Test-Path $Script:ExePath)) {
         throw "Build reported success but $Script:ExePath is missing. Check the log."
@@ -509,7 +518,7 @@ try { Start-Transcript -Path $Script:LogFile -Append | Out-Null } catch { Write-
 
 Write-Header "Nextcloud Sentinel - test pipeline"
 Write-Info "Repository : $Script:RepoDir"
-Write-Info "Branch     : $Branch"
+Write-Info "Branch     : $(if ($Branch) { $Branch } else { '(current)' })"
 Write-Info "Build dir  : $Script:BuildDir"
 Write-Info "Log        : $Script:LogFile"
 
