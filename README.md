@@ -34,7 +34,7 @@ We're building something new: a Nextcloud sync client that fights back against r
 | Windows build pipeline | ✅ Complete |
 | Linux build pipeline | ✅ Complete |
 | Android client | ⏳ Planned |
-| macOS native build | ⏳ Planned |
+| macOS native build | 🚧 CI build (unsigned) |
 | Production release | ⏳ Planned |
 
 ### What Works Today
