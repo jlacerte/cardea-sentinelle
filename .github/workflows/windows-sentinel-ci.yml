@@ -170,9 +170,9 @@ jobs:
           Write-Host "Kill Switch tests passed successfully!"
 
       # NOTE: Upstream Nextcloud tests are run for visibility only.
-        # They have known flaky tests unrelated to Kill Switch.
-        # Only Kill Switch tests are required to pass.
-        - name: Run all tests (informational)
+      # They have known flaky tests unrelated to Kill Switch.
+      # Only Kill Switch tests are required to pass.
+      - name: Run all tests (informational)
         continue-on-error: true
         if: ${{ github.event.inputs.run_all_tests == 'true' || github.event_name == 'push' }}
         shell: pwsh
