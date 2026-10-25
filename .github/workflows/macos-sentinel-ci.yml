@@ -66,7 +66,8 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install Homebrew dependencies
-        run: brew install homebrew/cask/inkscape
+        # create-dmg is what Craft's MacDMGPackager runs to build the .dmg.
+        run: brew install homebrew/cask/inkscape create-dmg
 
       # Only the dependencies are cached, saved right after they are installed:
       # a cache that also held the built client would make Craft skip the build.
@@ -163,6 +164,14 @@ jobs:
           set -e
           craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
 
+          # The desktop-client-blueprints recipe calls os.path.join() in createPackage()
+          # without importing os (newer Craft no longer re-exports it): add the import.
+          recipe="${{ github.workspace }}/${{ env.CRAFT_TARGET }}/etc/blueprints/locations/desktop-client-blueprints/nextcloud-client/nextcloud-client.py"
+          if ! grep -q '^import os$' "$recipe"; then
+            { echo 'import os'; cat "$recipe"; } > "$recipe.new" && mv "$recipe.new" "$recipe"
+          fi
+          head -3 "$recipe"
+
           echo "::group::Package Nextcloud Sentinel"
           craft --options nextcloud-client.srcDir="${{ github.workspace }}" \
                 --options nextcloud-client.buildFileProviderModule=False \
@@ -170,7 +179,7 @@ jobs:
           echo "::endgroup::"
 
           mkdir -p "${{ github.workspace }}/macos-package"
-          find "${{ github.workspace }}/${{ env.CRAFT_TARGET }}/tmp" -maxdepth 1 \( -name '*.dmg' -o -name '*.pkg' \) \
+          find "${{ github.workspace }}/${{ env.CRAFT_TARGET }}/tmp" -maxdepth 2 \( -name '*.dmg' -o -name '*.pkg' \) \
             -exec cp {} "${{ github.workspace }}/macos-package/" \;
           ls -la "${{ github.workspace }}/macos-package"
 
