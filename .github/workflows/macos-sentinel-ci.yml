@@ -68,23 +68,23 @@ jobs:
       - name: Install Homebrew dependencies
         run: brew install homebrew/cask/inkscape
 
-      - name: Cache Craft dependencies
+      # Only the dependencies are cached, saved right after they are installed:
+      # a cache that also held the built client would make Craft skip the build.
+      - name: Restore Craft dependencies
         id: cache-craft
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: |
             ${{ env.CRAFT_MASTER_LOCATION }}
             ${{ github.workspace }}/craft-clone
             ${{ github.workspace }}/${{ env.CRAFT_TARGET }}
-          key: craft-macos-sentinel-${{ hashFiles('craftmaster.ini') }}
-          restore-keys: |
-            craft-macos-sentinel-
+          key: craft-deps-macos-${{ hashFiles('craftmaster.ini') }}
 
       - name: Install Craft and Nextcloud Client dependencies
         if: steps.cache-craft.outputs.cache-hit != 'true'
         run: |
           set -e
-          [ -d "$CRAFT_MASTER_LOCATION" ] || git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git "$CRAFT_MASTER_LOCATION"
+          git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git "$CRAFT_MASTER_LOCATION"
           craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
 
           echo "::group::Add blueprint repositories"
@@ -99,6 +99,16 @@ jobs:
           echo "::group::Install dependencies"
           craft --install-deps nextcloud-client
           echo "::endgroup::"
+
+      - name: Save Craft dependencies
+        if: steps.cache-craft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ env.CRAFT_MASTER_LOCATION }}
+            ${{ github.workspace }}/craft-clone
+            ${{ github.workspace }}/${{ env.CRAFT_TARGET }}
+          key: craft-deps-macos-${{ hashFiles('craftmaster.ini') }}
 
       - name: Build Nextcloud Sentinel
         run: |
