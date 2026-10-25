@@ -72,6 +72,12 @@ jobs:
       - name: Setup Craft
         if: steps.cache-craft-restore.outputs.cache-hit != 'true'
         run: |
+          # The pinned Craft revision downloads zlib 1.3.1 from www.zlib.net, which no longer
+          # serves it (404). Pre-seed the same tarball (same SHA-256) from the GitHub release.
+          zlib_dir="${{ github.workspace }}/${{ env.CRAFT_TARGET }}/download/archives/libs/zlib"
+          mkdir -p "$zlib_dir"
+          curl -fsSL -o "$zlib_dir/zlib-1.3.1.tar.xz" https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz
+          echo "38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32  $zlib_dir/zlib-1.3.1.tar.xz" | shasum -a 256 -c
           python "${{ env.CRAFT_MASTER_LOCATION }}/CraftMaster.py" --config "${{ env.CRAFT_MASTER_CONFIG }}" --target ${{ env.CRAFT_TARGET }} -c craft
 
       - name: Install Craft Nextcloud client dependencies

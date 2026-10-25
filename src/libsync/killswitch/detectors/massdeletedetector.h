@@ -73,6 +73,11 @@ private:
     int m_threshold = 10;         // Number of deletions to trigger
     double m_rateLimit = 5.0;     // Max deletions per second before alert
     QSet<QString> m_whitelistedDirs; // Directories to ignore
+
+    // The rate rule needs a minimum amount of evidence: a sync run hands us
+    // its items within a few milliseconds, so "2 files in 1 ms" is not a
+    // 2000 files/s attack.
+    static constexpr qint64 MIN_RATE_WINDOW_MS = 1000;
 };
 
 } // namespace OCC

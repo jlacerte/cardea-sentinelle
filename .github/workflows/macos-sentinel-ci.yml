@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: 2026 Nextcloud Sentinel Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+name: macOS Sentinel CI
+
+on:
+  push:
+    branches:
+      - master
+      - 'sentinel-*'
+    paths:
+      - 'src/libsync/killswitch/**'
+      - 'src/gui/killswitch/**'
+      - 'test/testkillswitch.cpp'
+      - 'test/CMakeLists.txt'
+      - '.github/workflows/macos-sentinel-ci.yml'
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'src/libsync/killswitch/**'
+      - 'src/gui/killswitch/**'
+      - 'test/testkillswitch.cpp'
+      - 'test/CMakeLists.txt'
+      - '.github/workflows/macos-sentinel-ci.yml'
+  workflow_dispatch:
+    inputs:
+      run_all_tests:
+        description: 'Run all tests (not just Kill Switch)'
+        required: false
+        default: false
+        type: boolean
+      package:
+        description: 'Build an installable macOS package (.dmg/.pkg)'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: macos-sentinel-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CRAFT_TARGET: macos-clang-arm64
+  CRAFT_MASTER_LOCATION: ${{ github.workspace }}/CraftMaster
+  CRAFT_MASTER_CONFIG: ${{ github.workspace }}/craftmaster.ini
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  build-and-test:
+    name: Build & Test Kill Switch (Apple Silicon)
+    runs-on: macos-15
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Select Xcode 16.3
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Homebrew dependencies
+        run: brew install homebrew/cask/inkscape
+
+      # Only the dependencies are cached, saved right after they are installed:
+      # a cache that also held the built client would make Craft skip the build.
+      - name: Restore Craft dependencies
+        id: cache-craft
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ${{ env.CRAFT_MASTER_LOCATION }}
+            ${{ github.workspace }}/craft-clone
+            ${{ github.workspace }}/${{ env.CRAFT_TARGET }}
+          key: craft-deps-macos-${{ hashFiles('craftmaster.ini') }}
+
+      - name: Install Craft and Nextcloud Client dependencies
+        if: steps.cache-craft.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git "$CRAFT_MASTER_LOCATION"
+          craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
+
+          # The pinned Craft revision downloads zlib 1.3.1 from www.zlib.net, which no longer
+          # serves it (404). Pre-seed the same tarball (same SHA-256) from the GitHub release:
+          # Craft skips the download when the file and its digest are already present.
+          zlib_dir="${{ github.workspace }}/${{ env.CRAFT_TARGET }}/download/archives/libs/zlib"
+          mkdir -p "$zlib_dir"
+          curl -fsSL -o "$zlib_dir/zlib-1.3.1.tar.xz" https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz
+          echo "38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32  $zlib_dir/zlib-1.3.1.tar.xz" | shasum -a 256 -c
+
+          echo "::group::Add blueprint repositories"
+          craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-kde.git|next|"
+          craft --add-blueprint-repository "https://github.com/nextcloud/desktop-client-blueprints.git|next|"
+          echo "::endgroup::"
+
+          echo "::group::Install Craft"
+          craft craft
+          echo "::endgroup::"
+
+          echo "::group::Install dependencies"
+          craft --install-deps nextcloud-client
+          echo "::endgroup::"
+
+      - name: Save Craft dependencies
+        if: steps.cache-craft.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ${{ env.CRAFT_MASTER_LOCATION }}
+            ${{ github.workspace }}/craft-clone
+            ${{ github.workspace }}/${{ env.CRAFT_TARGET }}
+          key: craft-deps-macos-${{ hashFiles('craftmaster.ini') }}
+
+      - name: Build Nextcloud Sentinel
+        run: |
+          set -e
+          craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
+
+          echo "::group::Compile Nextcloud Sentinel"
+          craft --options nextcloud-client.srcDir="${{ github.workspace }}" \
+                --options nextcloud-client.buildFileProviderModule=False \
+                nextcloud-client
+          echo "::endgroup::"
+
+      - name: Run Kill Switch tests
+        run: |
+          cd "${{ github.workspace }}/${{ env.CRAFT_TARGET }}/build/nextcloud-client/work/build"
+          echo "::group::Run Kill Switch Tests"
+          ctest -R KillSwitch --output-on-failure --timeout 300
+          echo "::endgroup::"
+
+      # NOTE: Upstream Nextcloud tests are run for visibility only.
+      # They have known flaky tests unrelated to Kill Switch.
+      # Only Kill Switch tests are required to pass.
+      - name: Run all tests (informational)
+        continue-on-error: true
+        if: ${{ github.event.inputs.run_all_tests == 'true' || github.event_name == 'push' }}
+        run: |
+          cd "${{ github.workspace }}/${{ env.CRAFT_TARGET }}/build/nextcloud-client/work/build"
+          echo "::group::Run All Tests"
+          ctest --output-on-failure --timeout 300
+          echo "::endgroup::"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-results-macos
+          path: ${{ github.workspace }}/${{ env.CRAFT_TARGET }}/build/nextcloud-client/work/build/Testing/
+          retention-days: 7
+
+      # Package the app bundle the way admin/osx/mac-crafter does: macdeployqt already ran
+      # as a post-build step, so the Nextcloud.app bundle is self-contained. Craft's own
+      # MacDMGPackager fails on this bundle (mergeTree on PlugIns/platforms/libqcocoa.dylib).
+      # The app is only ad-hoc signed and not notarized: Gatekeeper warns on first launch.
+      - name: Package Nextcloud Sentinel
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.package == 'true' }}
+        run: |
+          set -e
+          root="${{ github.workspace }}/${{ env.CRAFT_TARGET }}"
+          app=""
+          # The build-tree bundle is the one macdeployqt made self-contained (POST_BUILD step).
+          for candidate in "$root/build/nextcloud-client/work/build/bin/Nextcloud.app" "$root/Nextcloud.app"; do
+            if [ -d "$candidate" ]; then app="$candidate"; break; fi
+          done
+          if [ -z "$app" ]; then
+            app=$(find "$root/build/nextcloud-client" -name Nextcloud.app -type d -prune 2>/dev/null | head -1)
+          fi
+          if [ -z "$app" ]; then
+            echo "::error::Nextcloud.app not found"
+            find "$root" -maxdepth 6 -name '*.app' -type d | head -20
+            exit 1
+          fi
+          echo "App bundle: $app"
+
+          staging="${{ github.workspace }}/dmg-staging"
+          rm -rf "$staging" && mkdir -p "$staging"
+          ditto "$app" "$staging/Nextcloud.app"
+          ln -s /Applications "$staging/Applications"
+
+          # Apple Silicon refuses to run unsigned code: sign ad hoc (no Apple account needed).
+          codesign --force --deep --sign - "$staging/Nextcloud.app" || echo "::warning::ad-hoc codesign failed"
+          codesign --verify --deep --verbose=2 "$staging/Nextcloud.app" || echo "::warning::codesign --verify reported issues"
+
+          mkdir -p "${{ github.workspace }}/macos-package"
+          dmg="${{ github.workspace }}/macos-package/Nextcloud-Sentinel-macos-arm64-${GITHUB_SHA:0:7}.dmg"
+          hdiutil create -volname "Nextcloud Sentinel" -srcfolder "$staging" -ov -format UDZO "$dmg"
+          ls -la "${{ github.workspace }}/macos-package"
+
+      - name: Upload macOS package
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.package == 'true' }}
+        uses: actions/upload-artifact@v6
+        with:
+          name: nextcloud-sentinel-macos-arm64
+          path: ${{ github.workspace }}/macos-package/
+          if-no-files-found: error
+          retention-days: 14
