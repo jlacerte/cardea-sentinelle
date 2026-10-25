@@ -66,8 +66,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install Homebrew dependencies
-        # create-dmg is what Craft's MacDMGPackager runs to build the .dmg.
-        run: brew install homebrew/cask/inkscape create-dmg
+        run: brew install homebrew/cask/inkscape
 
       # Only the dependencies are cached, saved right after they are installed:
       # a cache that also held the built client would make Craft skip the build.
@@ -157,30 +156,42 @@ jobs:
           path: ${{ github.workspace }}/${{ env.CRAFT_TARGET }}/build/nextcloud-client/work/build/Testing/
           retention-days: 7
 
-      # The package is not signed or notarized: macOS Gatekeeper will warn on first launch.
+      # Package the app bundle the way admin/osx/mac-crafter does: macdeployqt already ran
+      # as a post-build step, so the Nextcloud.app bundle is self-contained. Craft's own
+      # MacDMGPackager fails on this bundle (mergeTree on PlugIns/platforms/libqcocoa.dylib).
+      # The app is only ad-hoc signed and not notarized: Gatekeeper warns on first launch.
       - name: Package Nextcloud Sentinel
         if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.package == 'true' }}
         run: |
           set -e
-          craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
-
-          # The desktop-client-blueprints recipe calls os.path.join() in createPackage()
-          # without importing os (newer Craft no longer re-exports it): add the import.
-          recipe="${{ github.workspace }}/${{ env.CRAFT_TARGET }}/etc/blueprints/locations/desktop-client-blueprints/nextcloud-client/nextcloud-client.py"
-          if ! grep -q '^import os$' "$recipe"; then
-            { echo 'import os'; cat "$recipe"; } > "$recipe.new" && mv "$recipe.new" "$recipe"
+          root="${{ github.workspace }}/${{ env.CRAFT_TARGET }}"
+          app=""
+          # The build-tree bundle is the one macdeployqt made self-contained (POST_BUILD step).
+          for candidate in "$root/build/nextcloud-client/work/build/bin/Nextcloud.app" "$root/Nextcloud.app"; do
+            if [ -d "$candidate" ]; then app="$candidate"; break; fi
+          done
+          if [ -z "$app" ]; then
+            app=$(find "$root/build/nextcloud-client" -name Nextcloud.app -type d -prune 2>/dev/null | head -1)
           fi
-          head -3 "$recipe"
+          if [ -z "$app" ]; then
+            echo "::error::Nextcloud.app not found"
+            find "$root" -maxdepth 6 -name '*.app' -type d | head -20
+            exit 1
+          fi
+          echo "App bundle: $app"
 
-          echo "::group::Package Nextcloud Sentinel"
-          craft --options nextcloud-client.srcDir="${{ github.workspace }}" \
-                --options nextcloud-client.buildFileProviderModule=False \
-                --package nextcloud-client
-          echo "::endgroup::"
+          staging="${{ github.workspace }}/dmg-staging"
+          rm -rf "$staging" && mkdir -p "$staging"
+          ditto "$app" "$staging/Nextcloud.app"
+          ln -s /Applications "$staging/Applications"
+
+          # Apple Silicon refuses to run unsigned code: sign ad hoc (no Apple account needed).
+          codesign --force --deep --sign - "$staging/Nextcloud.app" || echo "::warning::ad-hoc codesign failed"
+          codesign --verify --deep --verbose=2 "$staging/Nextcloud.app" || echo "::warning::codesign --verify reported issues"
 
           mkdir -p "${{ github.workspace }}/macos-package"
-          find "${{ github.workspace }}/${{ env.CRAFT_TARGET }}/tmp" -maxdepth 2 \( -name '*.dmg' -o -name '*.pkg' \) \
-            -exec cp {} "${{ github.workspace }}/macos-package/" \;
+          dmg="${{ github.workspace }}/macos-package/Nextcloud-Sentinel-macos-arm64-${GITHUB_SHA:0:7}.dmg"
+          hdiutil create -volname "Nextcloud Sentinel" -srcfolder "$staging" -ov -format UDZO "$dmg"
           ls -la "${{ github.workspace }}/macos-package"
 
       - name: Upload macOS package
