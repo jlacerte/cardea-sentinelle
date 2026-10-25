@@ -87,6 +87,14 @@ jobs:
           git clone -q --depth=1 https://invent.kde.org/packaging/craftmaster.git "$CRAFT_MASTER_LOCATION"
           craft() { python "$CRAFT_MASTER_LOCATION/CraftMaster.py" --config "$CRAFT_MASTER_CONFIG" --target "$CRAFT_TARGET" -c "$@"; }
 
+          # The pinned Craft revision downloads zlib 1.3.1 from www.zlib.net, which no longer
+          # serves it (404). Pre-seed the same tarball (same SHA-256) from the GitHub release:
+          # Craft skips the download when the file and its digest are already present.
+          zlib_dir="${{ github.workspace }}/${{ env.CRAFT_TARGET }}/download/archives/libs/zlib"
+          mkdir -p "$zlib_dir"
+          curl -fsSL -o "$zlib_dir/zlib-1.3.1.tar.xz" https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.xz
+          echo "38ef96b8dfe510d42707d9c781877914792541133e1870841463bfa73f883e32  $zlib_dir/zlib-1.3.1.tar.xz" | shasum -a 256 -c
+
           echo "::group::Add blueprint repositories"
           craft --add-blueprint-repository "https://github.com/nextcloud/craft-blueprints-kde.git|next|"
           craft --add-blueprint-repository "https://github.com/nextcloud/desktop-client-blueprints.git|next|"
